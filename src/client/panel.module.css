@@ -1,0 +1,214 @@
+.fab {
+  position: fixed;
+  right: 12px;
+  bottom: 96px;
+  z-index: 2147483000;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.35));
+  background: var(--dsw-alias-bg-overlay, rgba(24, 24, 28, 0.92));
+  color: var(--dsw-alias-label-primary, #e8e8ec);
+  box-shadow: var(--dsw-shadow-lv2, 0 4px 16px rgba(0, 0, 0, 0.35));
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: transform 0.12s ease, background 0.16s ease;
+}
+
+.fab:hover {
+  transform: translateY(-1px);
+  background: var(--dsw-alias-bg-hover, rgba(40, 40, 46, 0.95));
+}
+
+.count {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dsw-alias-label-secondary, rgba(200, 200, 210, 0.75));
+}
+
+.panel {
+  position: fixed;
+  right: 12px;
+  bottom: 144px;
+  z-index: 2147483001;
+  width: min(360px, calc(100vw - 32px));
+  max-height: min(60vh, 520px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.35));
+  background: var(--dsw-alias-bg-overlay, rgba(24, 24, 28, 0.96));
+  box-shadow: var(--dsw-shadow-lv2, 0 8px 28px rgba(0, 0, 0, 0.45));
+  color: var(--dsw-alias-label-primary, #e8e8ec);
+  font-family: var(--dsw-font-body, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow: hidden;
+  animation: panel-in 0.14s ease-out;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.close {
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.body {
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.empty {
+  padding: 16px 8px;
+  color: var(--dsw-alias-label-tertiary);
+  text-align: center;
+}
+
+.error {
+  padding: 8px 10px;
+  margin: 6px 0;
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover-danger, rgba(180, 50, 50, 0.16));
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.row:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.14));
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--dsw-alias-interactive-focus, rgba(120, 150, 255, 0.8));
+  outline-offset: -2px;
+}
+
+.rowHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.index {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, rgba(200, 200, 210, 0.6));
+}
+
+.snapBadge {
+  flex: none;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: help;
+}
+
+.time {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, rgba(200, 200, 210, 0.6));
+}
+
+.preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  color: var(--dsw-alias-label-primary, #e8e8ec);
+}
+
+.notice {
+  padding: 6px 10px;
+  margin: 6px 0;
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.14));
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+
+/* Embedded inside the sidebar panel: strip every floating-popover property
+   and occupy exactly the top half of the sidebar body, scrolling internally. */
+.embedded {
+  position: static;
+  width: auto;
+  max-height: none;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  animation: none;
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.embedded .head {
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128, 128, 128, 0.2));
+}
+
+.embedded .body {
+  padding: 8px 0 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+}
+
+@media (max-width: 767px) {
+  .fab {
+    right: 8px;
+    bottom: 88px;
+  }
+  .panel {
+    right: 8px;
+    bottom: 136px;
+    width: calc(100vw - 20px);
+  }
+}

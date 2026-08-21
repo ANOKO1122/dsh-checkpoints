@@ -1,0 +1,126 @@
+/* Right-hand session sidebar for checkpoints + file changes. It rides the
+   shell.overlay slot and is styled as a docked panel (full height, left
+   border, frame tokens) so it reads as part of the DSH layout rather than a
+   floating popover. */
+
+.root {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2147483000;
+  box-sizing: border-box;
+  pointer-events: auto;
+  width: min(360px, calc(100vw - 56px));
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-shadow-lv2);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-body);
+  font-size: 13px;
+  line-height: 1.45;
+  animation: sidebar-in 0.14s ease-out;
+}
+
+@keyframes sidebar-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.close {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The two embedded sections split this body 50/50 and scroll internally,
+   so the body itself never scrolls. */
+.body {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Right-edge tab, shown while the panel is closed. It docks to the frame edge
+   so it reads as a panel handle rather than a floating FAB. */
+.edgeButton {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  z-index: 2147482999;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 36px;
+  height: 96px;
+  padding: 8px 0;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-right: none;
+  border-radius: 10px 0 0 10px;
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-shadow-lv2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.edgeButton:hover {
+  background: var(--dsw-alias-bg-layer-3);
+  color: var(--dsw-alias-label-primary);
+}
+
+.edgeIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.edgeLabel {
+  writing-mode: vertical-rl;
+  letter-spacing: 0.08em;
+}

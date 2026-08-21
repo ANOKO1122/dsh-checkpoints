@@ -1,0 +1,160 @@
+/* Inline edit card: the same visual language as a sent user bubble plus the
+   composer's model select and circular send button. Tokens come from the DSH
+   theme, so it tracks light/dark and density changes with the rest of the UI. */
+
+.root {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 10px;
+}
+
+.card {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(525px, 82%);
+  padding: 10px 16px;
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(128, 128, 128, 0.3));
+  border-radius: 22px;
+  background: var(--dsw-specific-input-major, var(--dsw-specific-bubble, rgba(40, 40, 46, 0.9)));
+  box-shadow: var(--dsw-shadow-lv2, 0 2px 12px rgba(0, 0, 0, 0.25));
+  font-size: 16px;
+  line-height: 24px;
+  color: var(--dsw-alias-label-primary, #e8e8ec);
+}
+
+.textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 48px;
+  max-height: 260px;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--dsw-alias-label-primary, #e8e8ec);
+  font-family: var(--dsw-font-family, system-ui, sans-serif);
+  font-size: inherit;
+  line-height: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  resize: none;
+}
+
+.textarea::placeholder {
+  color: var(--dsw-alias-label-caption, rgba(200, 200, 210, 0.5));
+  user-select: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+/* Mirrors the composer's chip-like native <select>. */
+.modelSelect {
+  max-width: 220px;
+  height: 28px;
+  padding: 0 20px 0 8px;
+  border: none;
+  border-radius: 8px;
+  outline: none;
+  background-color: transparent;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 4px center;
+  background-size: 12px 12px;
+  color: var(--dsw-alias-label-secondary, rgba(200, 200, 210, 0.75));
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  appearance: none;
+}
+
+.modelSelect:hover:not(:disabled) {
+  background-color: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.14));
+}
+
+.modelSelect:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Reasoning-effort chip: same select treatment, just narrower, sitting next
+   to the model select. Combined with .modelSelect on the element. */
+.effortSelect {
+  max-width: 148px;
+  margin-left: 2px;
+}
+
+.cancel {
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, rgba(200, 200, 210, 0.75));
+  font-size: 13px;
+  line-height: 20px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.cancel:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.14));
+  color: var(--dsw-alias-label-primary, #e8e8ec);
+}
+
+.cancel:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Composer primary-send shape: 34px circle, info fill, white glyph. */
+.send {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 999px;
+  background: var(--dsw-alias-button-info-fill, #3964fe);
+  color: #fff;
+  cursor: pointer;
+  transition: background-color 100ms ease;
+}
+
+.send:hover:not(:disabled) {
+  background: var(--dsw-alias-button-info-hover, #679efe);
+}
+
+.send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.error {
+  color: var(--dsw-alias-state-error-primary, #ffb4b4);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}

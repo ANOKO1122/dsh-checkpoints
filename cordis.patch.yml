@@ -1,0 +1,8 @@
+# dsh-checkpoints bundle patch
+#
+# Install with:
+#   dsh plugin --profile <profile> add /path/to/dsh-checkpoints
+# Then restart the profile.
+- insert:
+    - id: dsh-checkpoints
+      name: dsh-checkpoints
