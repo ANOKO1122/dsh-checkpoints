@@ -29,6 +29,8 @@ export interface FileDiffStat {
   readonly deletions: number
   /** True when the file is binary; counts are meaningless for it. */
   readonly binary?: boolean
+  /** Presence change vs the snapshot: brand-new, removed, or content-edited. */
+  readonly status?: 'added' | 'deleted' | 'modified'
 }
 
 /** A captured workspace snapshot reference. */
@@ -329,14 +331,14 @@ async function diffPathSets(
     if (snapshotText === undefined && currentText === undefined) continue
     if (snapshotText === undefined) {
       const additions = currentText === undefined ? 0 : currentText.split('\n').length
-      stats.push({ path: rel, additions, deletions: 0 })
+      stats.push({ path: rel, additions, deletions: 0, status: 'added' })
     } else if (currentText === undefined) {
       const deletions = snapshotText.split('\n').length
-      stats.push({ path: rel, additions: 0, deletions })
+      stats.push({ path: rel, additions: 0, deletions, status: 'deleted' })
     } else {
       const diff = countLineDiff(snapshotText, currentText)
       if (diff.additions > 0 || diff.deletions > 0) {
-        stats.push({ path: rel, ...diff })
+        stats.push({ path: rel, ...diff, status: 'modified' })
       }
     }
   }
@@ -346,8 +348,10 @@ async function diffPathSets(
 /** A tiny line-diff counter. Returns added/deleted line counts. */
 export function countLineDiff(oldText: string, newText: string): { additions: number; deletions: number } {
   if (oldText === newText) return { additions: 0, deletions: 0 }
-  const a = oldText.split('\n')
-  const b = newText.split('\n')
+  // An empty text is zero lines, not one empty line (matches git and the
+  // hunk differ in file-diff.ts).
+  const a = oldText === '' ? [] : oldText.split('\n')
+  const b = newText === '' ? [] : newText.split('\n')
   const n = a.length
   const m = b.length
   if (n === 0) return { additions: m, deletions: 0 }
@@ -407,6 +411,29 @@ async function gitCwdPrefix(cwd: string): Promise<string> {
 async function diffGitSnapshot(cwd: string, commit: string): Promise<FileDiffStat[]> {
   try {
     const prefix = await gitCwdPrefix(cwd)
+    const strip = (path: string): string =>
+      prefix !== '' && path.startsWith(prefix) ? path.slice(prefix.length) : path
+    // Presence status (A/D/M) is not part of --numstat output; pull it from a
+    // parallel --name-status run. Cosmetic: when it fails the list still works.
+    const statuses = new Map<string, FileDiffStat['status']>()
+    try {
+      const { stdout } = await execFileAsync(
+        'git', ['-C', cwd, 'diff', '--name-status', '-z', '--no-renames', commit, '--', '.'], execOptions,
+      )
+      const records = stdout.split('\0')
+      // With --no-renames every entry is exactly `status\0path\0`.
+      for (let i = 0; i + 1 < records.length; i += 2) {
+        const status = records[i]
+        const path = records[i + 1]
+        if (status === undefined || path === undefined || status === '' || path === '') continue
+        statuses.set(
+          strip(path),
+          status.startsWith('A') ? 'added' : status.startsWith('D') ? 'deleted' : 'modified',
+        )
+      }
+    } catch {
+      // keep going without statuses
+    }
     // `-z`: NUL-separated records, paths never quoted (non-ASCII filenames
     // such as Chinese stay readable). `--no-renames`: renames are reported as
     // a delete+add pair of real paths, so every path is directly usable for
@@ -425,11 +452,11 @@ async function diffGitSnapshot(cwd: string, commit: string): Promise<FileDiffSta
       const additions = binary ? 0 : Number.parseInt(addedRaw, 10)
       const deletions = binary ? 0 : Number.parseInt(deletedRaw, 10)
       if (Number.isNaN(additions) || Number.isNaN(deletions)) continue
-      let path = parts.slice(2).join('\t')
-      if (prefix !== '' && path.startsWith(prefix)) path = path.slice(prefix.length)
+      const path = strip(parts.slice(2).join('\t'))
+      const status = statuses.get(path)
       stats.push(binary
-        ? { path, additions: 0, deletions: 0, binary: true }
-        : { path, additions, deletions })
+        ? { path, additions: 0, deletions: 0, binary: true, status }
+        : { path, additions, deletions, status })
     }
     return stats.sort((a, b) => a.path.localeCompare(b.path))
   } catch {
@@ -522,6 +549,55 @@ export async function listSnapshotSeqs(
   const snapshotRoot = root ?? defaultSnapshotRoot()
   const index = await readIndex(snapshotRoot, sessionId)
   return new Set(Object.keys(index.bySeq).map(Number))
+}
+
+/**
+ * Read one file's content out of a snapshot record (the "old" side of a diff).
+ *
+ * Hybrid snapshots prefer the untracked-file copy (the file's state at
+ * snapshot time even if it was untracked), then fall back to the pinned git
+ * commit for tracked files. Returns undefined when the file did not exist in
+ * the snapshot at all (a file created afterwards).
+ */
+export async function readSnapshotRecordFile(
+  record: SnapshotRecord,
+  cwd: string,
+  relPath: string,
+): Promise<string | undefined> {
+  // `git show` and snapshot dirs always use '/'-separated paths.
+  const gitPath = relPath.split('\\').join('/')
+  if (record.kind === 'hybrid') {
+    if (record.untrackedDir !== undefined) {
+      const text = await readTextSafe(join(record.untrackedDir, relPath))
+      if (text !== undefined) return text
+    }
+    if (record.commit !== undefined) return readGitBlob(cwd, record.commit, gitPath)
+    return undefined
+  }
+  if (record.kind === 'git') {
+    if (record.commit === undefined) return undefined
+    return readGitBlob(cwd, record.commit, gitPath)
+  }
+  if (record.dir === undefined) return undefined
+  return readTextSafe(join(record.dir, relPath))
+}
+
+/** Read the current workspace copy of one file (the "new" side of a diff). */
+export async function readWorkspaceFile(cwd: string, relPath: string): Promise<string | undefined> {
+  return readTextSafe(join(cwd, relPath))
+}
+
+/** Read a blob's text out of a git commit (`<commit>:<path>`); undefined when absent. */
+async function readGitBlob(cwd: string, commit: string, gitPath: string): Promise<string | undefined> {
+  try {
+    const prefix = await gitCwdPrefix(cwd)
+    const { stdout } = await execFileAsync(
+      'git', ['-C', cwd, 'show', `${commit}:${prefix}${gitPath}`], execOptions,
+    )
+    return stdout
+  } catch {
+    return undefined
+  }
 }
 
 /** Whether a snapshot exists for exactly this checkpoint seq. */

@@ -64,6 +64,19 @@ export interface ConversationSnapshot {
   readonly running?: boolean
 }
 
+/** Loose RPC result mirror (every runtime call answers one of these). */
+export interface RpcResultLike<T> {
+  readonly ok: boolean
+  readonly value?: T
+  readonly error?: { readonly code?: string; readonly message?: string }
+}
+
+/** One durable image reference inside a sent message's content blocks. */
+export interface MessageImageRef {
+  readonly attachmentId: string
+  readonly mediaType?: string
+}
+
 /** The runtime Session face this plugin reads. */
 export interface SessionFace {
   readonly sessionId: string
@@ -71,6 +84,14 @@ export interface SessionFace {
   snapshotCache: ConversationSnapshot
   /** Load the next page of older history, when the runtime exposes it. */
   loadOlder?(): Promise<void>
+  /**
+   * Read one durable image attachment referenced by a sent message
+   * (historical message images); absent on older runtimes.
+   */
+  readAttachment?(attachmentId: string): Promise<RpcResultLike<{
+    attachment: { readonly mediaType?: string }
+    data: Uint8Array
+  }>>
 }
 
 export interface SessionBinding {
@@ -90,6 +111,8 @@ export interface SessionsFace {
 export interface InputFace {
   setDraft(text: string): void
   submit(): void
+  /** Append browser-owned draft image ids to the composer rail (absent on older runtimes). */
+  addImages?(ids: readonly string[]): boolean
 }
 
 /** The conversation service face exposing the input resolver. */
@@ -97,6 +120,8 @@ export interface ConversationFace {
   input: {
     for(actx: unknown): InputFace
   }
+  /** Register browser files as composer draft images; absent on older runtimes. */
+  createDraftImages?(files: readonly File[]): readonly { readonly id: string }[]
 }
 
 /** Host-advisory complete provider/model/reasoning selection. */
@@ -150,7 +175,7 @@ export interface ModelDirectoriesFace {
   directoryFor(sessionId: string): ModelDirectoryFace
 }
 
-/** Minimal slot-registry face used for sidebar integration. */
+/** Minimal slot-registry face used for sidebar + composer-dock integration. */
 export interface SlotsFace {
   register(options: {
     name: string
@@ -159,6 +184,12 @@ export interface SlotsFace {
     priority?: number
     label?: string | (() => string)
   }, component: unknown): () => void
+  /**
+   * Register into a slot once its declaration exists: the callback runs
+   * immediately when the slot is already declared, otherwise it re-runs on
+   * declaration. Handles plugin-vs-owner load order without polling.
+   */
+  inject(key: string, callback: () => () => void): () => void
 }
 
 /** Context augmentation for the services this plugin injects. */

@@ -5,6 +5,10 @@
  *
  *   GET  /plugins/dsh-checkpoints/list?sessionId=<id>
  *        → current visible user-instruction checkpoints
+ *   GET  /plugins/dsh-checkpoints/diff?sessionId=<id>&baseline=checkpoint|session
+ *        → per-file +/− line stats between a snapshot and the workspace
+ *   GET  /plugins/dsh-checkpoints/file-diff?sessionId=<id>&path=<rel>&baseline=...
+ *        → the actual unified-diff hunks of one file (snapshot vs workspace)
  *   POST /plugins/dsh-checkpoints/rewind  { sessionId, seq }
  *        → roll the visible conversation back to that checkpoint
  *   POST /plugins/dsh-checkpoints/recall  { sessionId, seq }
@@ -18,11 +22,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isAbsolute } from 'node:path'
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session'
 import { foldSurface } from '@deepseek-ai/dsh-session/surface'
 import type {} from '@deepseek-ai/dsh-agent'
 import { listCheckpoints, recallUserMessage, rewindToCheckpoint } from './domain.ts'
+import { diffToHunks, looksBinary, MAX_DIFF_TEXT_CHARS } from './file-diff.ts'
 import {
   captureSnapshot,
   diffSnapshotToWorkspace,
@@ -30,6 +35,8 @@ import {
   getSnapshot,
   getSnapshotStrict,
   listSnapshotSeqs,
+  readSnapshotRecordFile,
+  readWorkspaceFile,
   restoreSnapshot,
 } from './file-snapshot.ts'
 
@@ -125,6 +132,33 @@ function isSafeRelPath(value: string): boolean {
   if (value === '' || isAbsolute(value)) return false
   const segments = value.split(/[\\/]+/)
   return segments.every((segment) => segment !== '..' && segment !== '')
+}
+
+/** Seq of the latest visible user instruction (the "最近检查点" baseline). */
+function latestCheckpointSeq(session: Session): number | undefined {
+  const checkpoints = listCheckpoints(session)
+  return checkpoints[checkpoints.length - 1]?.seq
+}
+
+/**
+ * Resolve the baseline for diff routes: `checkpoint` diffs against the latest
+ * user instruction's snapshot, `session` against the session-start snapshot.
+ * `degraded` marks a checkpoint baseline without its own snapshot (the diff
+ * falls back to the session-start snapshot).
+ */
+async function resolveBaseline(
+  root: string,
+  sessionId: string,
+  session: Session,
+  baseline: 'checkpoint' | 'session',
+): Promise<{ seq?: number; degraded: boolean }> {
+  if (baseline === 'session') {
+    return { seq: undefined, degraded: false }
+  }
+  const seq = latestCheckpointSeq(session)
+  if (seq === undefined) return { seq: undefined, degraded: false }
+  const strict = await getSnapshotStrict(root, sessionId, seq)
+  return { seq, degraded: strict === undefined }
 }
 
 export function apply(ctx: Context, config: Config): void {
@@ -260,23 +294,87 @@ export function apply(ctx: Context, config: Config): void {
           let degraded = false
           try {
             const root = await ensureRoot(snapshotRoot)
-            const checkpoints = listCheckpoints(session)
-            const latest = checkpoints[checkpoints.length - 1]
-            const seq = baseline === 'session' ? undefined : latest?.seq
-            if (baseline === 'checkpoint' && seq !== undefined
-              && await getSnapshotStrict(root, sessionId, seq) === undefined) {
-              // The latest checkpoint has no snapshot of its own; the diff
-              // below silently falls back to the session-start snapshot, so
-              // tell the client instead of showing a mislabeled baseline.
-              degraded = true
+            if (baseline === 'checkpoint') {
+              degraded = (await resolveBaseline(root, sessionId, session, baseline)).degraded
             }
-            files = await diffSnapshotToWorkspace(root, sessionId, cwd, seq)
+            files = await diffSnapshotToWorkspace(root, sessionId, cwd, baseline === 'session' ? undefined : latestCheckpointSeq(session))
           } catch (error: unknown) {
             ctx.logger.warn(`dsh-checkpoints: diff unavailable: ${error instanceof Error ? error.message : String(error)}`)
           }
           const totalAdditions = files.reduce((sum, file) => sum + file.additions, 0)
           const totalDeletions = files.reduce((sum, file) => sum + file.deletions, 0)
           sendJson(res, 200, { ok: true, value: { baseline, degraded, files, totalAdditions, totalDeletions } })
+          return
+        }
+
+        if (req.method === 'GET' && path === `${routePrefix}/file-diff`) {
+          const sessionId = sessionIdOf(url.searchParams.get('sessionId'))
+          if (sessionId === undefined) {
+            sendError(res, 400, 'BAD_REQUEST', 'missing sessionId')
+            return
+          }
+          const relPath = url.searchParams.get('path')
+          if (relPath === null || !isSafeRelPath(relPath)) {
+            sendError(res, 400, 'BAD_REQUEST', 'missing or invalid path')
+            return
+          }
+          const baseline = url.searchParams.get('baseline') === 'session' ? 'session' : 'checkpoint'
+          const session = ctx.sessions.get(sessionId)
+          if (session === undefined) {
+            sendError(res, 404, 'SESSION_NOT_FOUND', `session "${sessionId}" not found`)
+            return
+          }
+          const cwd = session.header.cwd
+          if (!cwd) {
+            sendJson(res, 200, {
+              ok: true,
+              value: { path: relPath, baseline, degraded: false, binary: false, tooLarge: false, additions: 0, deletions: 0, hunks: [] },
+            })
+            return
+          }
+          try {
+            const root = await ensureRoot(snapshotRoot)
+            const { seq, degraded } = await resolveBaseline(root, sessionId, session, baseline)
+            const record = await getSnapshot(root, sessionId, seq)
+            if (record === undefined) {
+              // No snapshot at all: nothing to compare against.
+              sendJson(res, 200, {
+                ok: true,
+                value: { path: relPath, baseline, degraded: true, binary: false, tooLarge: false, additions: 0, deletions: 0, hunks: [] },
+              })
+              return
+            }
+            const [oldText, newText] = await Promise.all([
+              readSnapshotRecordFile(record, cwd, relPath),
+              readWorkspaceFile(cwd, relPath),
+            ])
+            if (oldText === undefined && newText === undefined) {
+              sendError(res, 404, 'FILE_NOT_FOUND', `file "${relPath}" exists neither in the snapshot nor in the workspace`)
+              return
+            }
+            if ((oldText !== undefined && looksBinary(oldText)) || (newText !== undefined && looksBinary(newText))) {
+              sendJson(res, 200, {
+                ok: true,
+                value: { path: relPath, baseline, degraded, binary: true, tooLarge: false, additions: 0, deletions: 0, hunks: [] },
+              })
+              return
+            }
+            if ((oldText?.length ?? 0) > MAX_DIFF_TEXT_CHARS || (newText?.length ?? 0) > MAX_DIFF_TEXT_CHARS) {
+              sendJson(res, 200, {
+                ok: true,
+                value: { path: relPath, baseline, degraded, binary: false, tooLarge: true, additions: 0, deletions: 0, hunks: [] },
+              })
+              return
+            }
+            const result = diffToHunks(oldText ?? '', newText ?? '')
+            sendJson(res, 200, {
+              ok: true,
+              value: { path: relPath, baseline, degraded, binary: false, tooLarge: false, ...result },
+            })
+          } catch (error: unknown) {
+            ctx.logger.warn(`dsh-checkpoints: file diff unavailable: ${error instanceof Error ? error.message : String(error)}`)
+            sendError(res, 422, 'FILE_DIFF_FAILED', error instanceof Error ? error.message : String(error))
+          }
           return
         }
 
@@ -452,6 +550,7 @@ export function apply(ctx: Context, config: Config): void {
       `${routePrefix}/list`,
       `${routePrefix}/surface`,
       `${routePrefix}/diff`,
+      `${routePrefix}/file-diff`,
       `${routePrefix}/rewind`,
       `${routePrefix}/recall`,
       `${routePrefix}/undo-file`,

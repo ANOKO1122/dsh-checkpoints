@@ -6,13 +6,23 @@
  * every rendered user message, and keeps message-action DOM in sync. Clicking
  * the edit icon hides the original row and mounts an inline editor in its
  * place with a composer-style send button and model selector.
+ *
+ * Two more surfaces are registered as slots:
+ *   - RoundChangesCard via the `conversation.input.dock` slot (order 5):
+ *     the "本轮改动" strip between the shipped todo strip and the input
+ *     card, sharing the dock column's width/scroll constraints.
+ *   - DiffViewerOverlay: the file comparison dialog (unified/side-by-side),
+ *     registered as its own `shell.overlay` slot entry.
  */
 
 import { createElement, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import type { Context, ModelDirectoryFace, ModelDirectoriesFace, SessionListState } from './context-types.ts'
+import type { Context, ConversationFace, ModelDirectoryFace, ModelDirectoriesFace, SessionListState } from './context-types.ts'
+import { DiffViewerOverlay } from './diff-viewer.tsx'
+import type { InlineEditImage } from './inline-edit.tsx'
 import { InlineEdit } from './inline-edit.tsx'
-import { reconcileMessageActions } from './message-actions.ts'
+import { reconcileMessageActions, type MessageImageRef } from './message-actions.ts'
+import { RoundChangesCard } from './round-changes-card.tsx'
 import { CheckpointSidebarOverlay, createPanelStore, type RootSlotRuntimeProps } from './sidebar.tsx'
 
 /** Services required before mounting. */
@@ -98,6 +108,8 @@ export function apply(ctx: Context): void {
   let editHost: HTMLDivElement | null = null
   let editRow: HTMLElement | null = null
   let editingKey: string | null = null
+  /** Open-generation token: stale async image loads must not mount over a newer editor. */
+  let editOpenSeq = 0
 
   const collectHiddenKeys = (seq: number, inclusive: boolean): Set<string> => {
     const keys = new Set<string>()
@@ -180,9 +192,38 @@ export function apply(ctx: Context): void {
     }
   }
 
-  const openInlineEditor = (sessionId: string, seq: number, text: string, row: HTMLElement, key: string): void => {
+  /**
+   * Fetch a sent message's images back as browser files so the inline editor
+   * can show them (and re-send them) like pre-send composer drafts.
+   * Failures degrade to a text-only edit for that image.
+   */
+  const loadEditImages = async (sessionId: string, imageRefs: readonly MessageImageRef[]): Promise<InlineEditImage[]> => {
+    if (imageRefs.length === 0) return []
+    const binding = sessions.binding(sessionId)
+    if (binding === undefined || binding.session.readAttachment === undefined) return []
+    const loaded = await Promise.all(imageRefs.map(async (ref): Promise<InlineEditImage | null> => {
+      try {
+        const result = await binding.session.readAttachment!(ref.attachmentId)
+        if (!result.ok || result.value === undefined) return null
+        const mediaType = ref.mediaType ?? result.value.attachment.mediaType ?? 'image/png'
+        const extension = mediaType.split('/')[1] ?? 'png'
+        // Copy into a plain-ArrayBuffer view: the wire bytes may be typed
+        // ArrayBufferLike, which File/Blob parts reject under strict lib types.
+        const bytes = new Uint8Array(result.value.data)
+        const file = new File([bytes], `image.${extension}`, { type: mediaType })
+        return { file, previewUrl: URL.createObjectURL(file) }
+      } catch (cause) {
+        console.warn('[dsh-checkpoints] edit image load failed:', cause)
+        return null
+      }
+    }))
+    return loaded.filter((image): image is InlineEditImage => image !== null)
+  }
+
+  const openInlineEditor = (sessionId: string, seq: number, text: string, imageRefs: readonly MessageImageRef[], row: HTMLElement, key: string): void => {
     closeInlineEditor(true)
 
+    const openSeq = ++editOpenSeq
     editingKey = key
     editRow = row
     row.style.display = 'none'
@@ -191,48 +232,82 @@ export function apply(ctx: Context): void {
     editHost.dataset.dshCheckpointsInlineEdit = ''
     row.after(editHost)
 
-    editRoot = createRoot(editHost)
-    editRoot.render(createElement(InlineEdit, {
-      sessionId,
-      initialText: text,
-      modelDirectory: modelDirectoryFor(sessionId),
-      onSubmit: async (editedText) => {
-        // 1) Ask about file rollback before touching the conversation.
-        const rollbackFiles = window.confirm(
-          '是否同时回退代码改动到该消息之前？\n\n'
-          + '“确定”= 对话和代码一起回退；\n'
-          + '“取消”= 只重写对话，代码保持现状。',
-        )
-        // 2) Remove the original instruction and everything after it.
-        const recallResult = await postRecall(sessionId, seq, { rollbackFiles, deleteNewFiles: false })
-        // 3) Keep the old rows hidden until the replacement surface commits.
-        hiddenKeys = collectHiddenKeys(seq, true)
-        refreshShadowedSeqs(sessionId)
-        closeInlineEditor(false)
-        // 4) Send the edited text through the ordinary composer path.
-        const draftSet = setDraftFor(sessionId, editedText)
-        await new Promise<void>((resolve) => { window.setTimeout(resolve, 0) })
-        const submitted = draftSet && submitFor(sessionId)
-        scheduleReconcile()
-        // 5) The conversation has already been rewound at this point, so any
-        // late failure must be reported instead of silently dropping either
-        // the file rollback or the edited text.
-        const problems: string[] = []
-        if (recallResult.filesRestored === false) {
-          problems.push(`文件回退失败：${recallResult.fileError ?? '未知原因'}\n（对话已回退，文件保持现状）`)
-        }
-        if (!submitted) {
-          problems.push(`编辑内容未能自动发送，请手动粘贴到输入框发送：\n\n${editedText}`)
-        }
-        if (problems.length > 0) {
-          window.alert(problems.join('\n\n———\n\n'))
-        }
-      },
-      onCancel: () => {
-        closeInlineEditor(true)
-        scheduleReconcile()
-      },
-    }))
+    const mount = (images: readonly InlineEditImage[]): void => {
+      editRoot = createRoot(editHost!)
+      editRoot.render(createElement(InlineEdit, {
+        sessionId,
+        initialText: text,
+        initialImages: images,
+        modelDirectory: modelDirectoryFor(sessionId),
+        onSubmit: async (editedText, _selection, files) => {
+          // 1) Ask about file rollback before touching the conversation.
+          const rollbackFiles = window.confirm(
+            '是否同时回退代码改动到该消息之前？\n\n'
+            + '“确定”= 对话和代码一起回退；\n'
+            + '“取消”= 只重写对话，代码保持现状。',
+          )
+          // 2) Remove the original instruction and everything after it.
+          const recallResult = await postRecall(sessionId, seq, { rollbackFiles, deleteNewFiles: false })
+          // 3) Keep the old rows hidden until the replacement surface commits.
+          hiddenKeys = collectHiddenKeys(seq, true)
+          refreshShadowedSeqs(sessionId)
+          closeInlineEditor(false)
+          // 4) Re-register the kept images as fresh composer drafts, then send
+          // text + images together through the ordinary composer submit path.
+          let restoredImages = 0
+          let imageProblem: string | undefined
+          if (files.length > 0) {
+            try {
+              const conversation = ctx.get('conversation') as ConversationFace | undefined
+              const scope = sessions.scope(sessionId)
+              const input = conversation !== undefined && scope !== undefined ? conversation.input.for(scope) : undefined
+              const ids = (conversation?.createDraftImages?.(files) ?? []).map(attachment => attachment.id)
+              if (input?.addImages !== undefined && ids.length > 0 && input.addImages(ids)) {
+                restoredImages = ids.length
+              }
+            } catch (cause) {
+              console.warn('[dsh-checkpoints] failed to restore edit images:', cause)
+            }
+            if (restoredImages !== files.length) {
+              imageProblem = `有 ${files.length - restoredImages} 张图片未能恢复，编辑后的消息将不包含它们。`
+            }
+          }
+          const draftSet = setDraftFor(sessionId, editedText)
+          await new Promise<void>((resolve) => { window.setTimeout(resolve, 0) })
+          const submitted = draftSet && submitFor(sessionId)
+          scheduleReconcile()
+          // 5) The conversation has already been rewound at this point, so any
+          // late failure must be reported instead of silently dropping either
+          // the file rollback or the edited content.
+          const problems: string[] = []
+          if (recallResult.filesRestored === false) {
+            problems.push(`文件回退失败：${recallResult.fileError ?? '未知原因'}\n（对话已回退，文件保持现状）`)
+          }
+          if (imageProblem !== undefined) problems.push(imageProblem)
+          if (!submitted || (editedText.trim() === '' && files.length > 0 && restoredImages === 0)) {
+            problems.push(`编辑内容未能自动发送，请手动粘贴到输入框发送：\n\n${editedText}`)
+          }
+          if (problems.length > 0) {
+            window.alert(problems.join('\n\n———\n\n'))
+          }
+        },
+        onCancel: () => {
+          closeInlineEditor(true)
+          scheduleReconcile()
+        },
+      }))
+    }
+
+    // Historical images load first so the editor mounts once, with thumbnails
+    // already in place (text-only edits resolve immediately).
+    void loadEditImages(sessionId, imageRefs).then((images) => {
+      if (openSeq !== editOpenSeq || editHost === null) {
+        // Superseded by a newer open/close: discard the fetched previews.
+        for (const image of images) URL.revokeObjectURL(image.previewUrl)
+        return
+      }
+      mount(images)
+    })
   }
 
   function scheduleReconcile(): void {
@@ -244,8 +319,8 @@ export function apply(ctx: Context): void {
       const binding = sessions.binding(sessionId)
       if (binding === undefined) return
       reconcileMessageActions(binding.session, scrollport, hiddenKeys, shadowedSeqs, editingKey, {
-        onEdit: (seq, text, row, key) => {
-          openInlineEditor(sessionId, seq, text, row, key)
+        onEdit: (seq, text, images, row, key) => {
+          openInlineEditor(sessionId, seq, text, images, row, key)
         },
       })
     }, 60)
@@ -282,6 +357,18 @@ export function apply(ctx: Context): void {
     return true
   }
 
+  // Composer dock entry: the "本轮改动" strip between the shipped todo strip
+  // (order 0) and the input card. The dock renders per session scope, so the
+  // card remounts with its session; `slots.inject` waits for ui-conversation
+  // to declare the slot when this plugin loads first.
+  const RoundChangesDock = (props: { session?: { readonly sessionId: string } }): ReactNode => {
+    const sessionId = props.session?.sessionId
+    if (sessionId === undefined) return null
+    const binding = sessions.binding(sessionId)
+    if (binding === undefined) return null
+    return createElement(RoundChangesCard, { sessionId, session: binding.session })
+  }
+
   // Sidebar toggle in the left nav footer + the docked right-hand panel.
   if (slots !== undefined) {
     const OverlayEntry = (props: { useSessions?: (selector: (state: SessionListState) => unknown) => unknown }): ReactNode => (
@@ -292,6 +379,17 @@ export function apply(ctx: Context): void {
       })
     )
     slotDisposers.push(slots.register({ name: 'shell.overlay', id: 'dsh-checkpoints-sidebar', order: 0 }, OverlayEntry))
+
+    const DiffViewerEntry = (): ReactNode => createElement(DiffViewerOverlay)
+    slotDisposers.push(slots.register({ name: 'shell.overlay', id: 'dsh-checkpoints-diff-viewer', order: 1 }, DiffViewerEntry))
+
+    slotDisposers.push(slots.inject('conversation.input.dock', () =>
+      slots.register({
+        name: 'conversation.input.dock',
+        id: 'dsh-checkpoints-round-changes',
+        order: 5,
+      }, RoundChangesDock),
+    ))
   }
 
   const sync = (): void => {

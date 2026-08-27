@@ -158,3 +158,86 @@
   line-height: 18px;
   overflow-wrap: anywhere;
 }
+
+/* Draft image rail, mirroring the composer's pre-send thumbnails: small
+   rounded previews, each with a remove overlay. */
+.imageRail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.imageThumb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 10px;
+  overflow: visible;
+}
+
+.imageThumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(128, 128, 128, 0.3));
+}
+
+/* Remove chip on one thumbnail: the same quiet icon-button treatment as the
+   plugin's dialog close buttons — theme layer-2 surface, hairline border,
+   secondary label; turns destructive on hover. Only tokens proven elsewhere
+   in this plugin are used, so it tracks light/dark correctly. */
+.imageRemove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(128, 128, 128, 0.3));
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2, rgba(40, 40, 46, 0.9));
+  color: var(--dsw-alias-label-secondary, rgba(200, 200, 210, 0.75));
+  cursor: pointer;
+  box-shadow: var(--dsw-shadow-lv2, 0 2px 12px rgba(0, 0, 0, 0.25));
+}
+
+.imageRemove:hover:not(:disabled) {
+  border-color: var(--dsw-alias-state-error-primary, #ffb4b4);
+  background: var(--dsw-alias-state-error-primary, #ffb4b4);
+  color: #fff;
+}
+
+.imageRemove:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Add-image chip in the button row (paperclip-adjacent affordance). */
+.addImage {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin-right: 6px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, rgba(200, 200, 210, 0.75));
+  cursor: pointer;
+}
+
+.addImage:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.14));
+  color: var(--dsw-alias-label-primary, #e8e8ec);
+}
+
+.addImage:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

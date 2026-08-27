@@ -16,20 +16,48 @@ const KEY_ATTR = 'data-dsh-checkpoints-key'
 const SEQ_ATTR = 'data-dsh-checkpoints-seq'
 
 export interface MessageActionCallbacks {
-  readonly onEdit: (seq: number, text: string, row: HTMLElement, key: string) => void
+  readonly onEdit: (seq: number, text: string, images: readonly MessageImageRef[], row: HTMLElement, key: string) => void
+}
+
+/** Loose image-attachment reference inside a sent message's content blocks. */
+export interface MessageImageRef {
+  readonly attachmentId: string
+  readonly mediaType?: string
+}
+
+export interface NodeContentParts {
+  readonly text: string
+  readonly images: readonly MessageImageRef[]
+}
+
+/** Extract the plain text and image attachments from a user/steering node. */
+export function contentPartsOfNode(node: ChatNode): NodeContentParts {
+  const data = node.data as { content?: unknown } | undefined
+  const content = data?.content
+  if (!Array.isArray(content)) return { text: '', images: [] }
+  const texts: string[] = []
+  const images: MessageImageRef[] = []
+  for (const block of content) {
+    const b = block as {
+      type?: string
+      text?: string
+      attachment?: { readonly attachmentId?: unknown; readonly mediaType?: unknown }
+    } | null
+    if (b === null) continue
+    if (b.type === 'text' && typeof b.text === 'string') texts.push(b.text)
+    else if (b.type === 'image' && typeof b.attachment?.attachmentId === 'string') {
+      images.push({
+        attachmentId: b.attachment.attachmentId,
+        ...(typeof b.attachment.mediaType === 'string' ? { mediaType: b.attachment.mediaType } : {}),
+      })
+    }
+  }
+  return { text: texts.join('\n').trim(), images }
 }
 
 /** Extract the plain text from a user/steering node's content blocks. */
 export function textOfNode(node: ChatNode): string {
-  const data = node.data as { content?: unknown } | undefined
-  const content = data?.content
-  if (!Array.isArray(content)) return ''
-  const parts: string[] = []
-  for (const block of content) {
-    const b = block as { type?: string; text?: string } | null
-    if (b !== null && b.type === 'text' && typeof b.text === 'string') parts.push(b.text)
-  }
-  return parts.join('\n').trim()
+  return contentPartsOfNode(node).text
 }
 
 /** Loose node-data shape for the built-in message clock time. */
@@ -166,13 +194,23 @@ export function reconcileMessageActions(
   }
 }
 
-/** Find the built-in actions row for a rendered user row. */
+/**
+ * Find the built-in actions row for a rendered user row.
+ *
+ * The chat anchor (`data-chat-anchor-key`) wraps the WHOLE rendered node, and
+ * an image message carries extra buttons (the thumbnails) BEFORE its actions
+ * row — so `lastElementChild` is the bubble stack and the first button in the
+ * row is a thumbnail, which used to drop the edit icon onto the image. The
+ * built-in copy button is the LAST button in DOM order (the actions row
+ * renders after the content), and its parent is the actions row.
+ */
 function findActionsRow(row: HTMLElement): HTMLElement | null {
-  const candidate = row.lastElementChild
-  if (candidate instanceof HTMLElement && candidate.querySelector('button') !== null) {
-    return candidate
-  }
-  return null
+  const buttons = row.querySelectorAll<HTMLButtonElement>('button')
+  const last = buttons[buttons.length - 1]
+  if (last === undefined) return null
+  const actionsRow = last.parentElement
+  if (actionsRow === null || actionsRow === row) return null
+  return actionsRow
 }
 
 function ensureEditAction(row: HTMLElement, node: ChatNode, callbacks: MessageActionCallbacks): void {
@@ -199,6 +237,7 @@ function ensureEditAction(row: HTMLElement, node: ChatNode, callbacks: MessageAc
   editButton.setAttribute(SEQ_ATTR, String(node.anchorSeq))
   editButton.style.display = ''
   editButton.onclick = () => {
-    callbacks.onEdit(node.anchorSeq, textOfNode(node), row, node.key)
+    const parts = contentPartsOfNode(node)
+    callbacks.onEdit(node.anchorSeq, parts.text, parts.images, row, node.key)
   }
 }

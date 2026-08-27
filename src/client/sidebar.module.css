@@ -11,7 +11,7 @@
   z-index: 2147483000;
   box-sizing: border-box;
   pointer-events: auto;
-  width: min(360px, calc(100vw - 56px));
+  width: min(420px, calc(100vw - 56px));
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--dsw-alias-border-l1);
