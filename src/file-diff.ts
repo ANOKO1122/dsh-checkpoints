@@ -208,6 +208,7 @@ function fullOps(a: readonly string[], b: readonly string[]): RawOp[] {
  * result is an empty hunk list with zero counts.
  */
 export function diffToHunks(oldText: string, newText: string): HunkDiffResult {
+  if (oldText === newText) return { hunks: [], additions: 0, deletions: 0 }
   const a = splitDiffLines(oldText)
   const b = splitDiffLines(newText)
   const ops = fullOps(a, b)

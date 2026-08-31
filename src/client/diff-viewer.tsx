@@ -399,7 +399,7 @@ export function DiffViewerOverlay(): ReactElement | null {
       .then((next) => { if (!cancelled) setFiles(next) })
       .catch((cause: unknown) => { if (!cancelled) setFilesError(cause instanceof Error ? cause.message : String(cause)) })
     return () => { cancelled = true }
-  }, [open, state.sessionId, state.baseline, state.path])
+  }, [open, state.sessionId, state.baseline])
 
   // Diff content of the selected file.
   useEffect(() => {

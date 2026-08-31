@@ -294,10 +294,9 @@ export function apply(ctx: Context, config: Config): void {
           let degraded = false
           try {
             const root = await ensureRoot(snapshotRoot)
-            if (baseline === 'checkpoint') {
-              degraded = (await resolveBaseline(root, sessionId, session, baseline)).degraded
-            }
-            files = await diffSnapshotToWorkspace(root, sessionId, cwd, baseline === 'session' ? undefined : latestCheckpointSeq(session))
+            const resolved = await resolveBaseline(root, sessionId, session, baseline)
+            degraded = resolved.degraded
+            files = await diffSnapshotToWorkspace(root, sessionId, cwd, resolved.seq)
           } catch (error: unknown) {
             ctx.logger.warn(`dsh-checkpoints: diff unavailable: ${error instanceof Error ? error.message : String(error)}`)
           }

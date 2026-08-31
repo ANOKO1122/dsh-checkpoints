@@ -326,17 +326,27 @@ async function diffPathSets(
   const allPaths = new Set([...snapshotFiles, ...currentFiles])
   const stats: FileDiffStat[] = []
   for (const rel of allPaths) {
-    const snapshotText = await readTextSafe(join(snapshotDir, rel))
-    const currentText = await readTextSafe(join(cwd, rel))
-    if (snapshotText === undefined && currentText === undefined) continue
-    if (snapshotText === undefined) {
-      const additions = currentText === undefined ? 0 : currentText.split('\n').length
+    const snapshot = await readDiffFileSafe(join(snapshotDir, rel))
+    const current = await readDiffFileSafe(join(cwd, rel))
+    if (!snapshot.exists && !current.exists) continue
+    if (snapshot.binary || current.binary) {
+      stats.push({
+        path: rel,
+        additions: 0,
+        deletions: 0,
+        binary: true,
+        status: !snapshot.exists ? 'added' : !current.exists ? 'deleted' : 'modified',
+      })
+      continue
+    }
+    if (!snapshot.exists) {
+      const additions = current.text === undefined ? 0 : current.text.split('\n').length
       stats.push({ path: rel, additions, deletions: 0, status: 'added' })
-    } else if (currentText === undefined) {
-      const deletions = snapshotText.split('\n').length
+    } else if (!current.exists) {
+      const deletions = snapshot.text === undefined ? 0 : snapshot.text.split('\n').length
       stats.push({ path: rel, additions: 0, deletions, status: 'deleted' })
     } else {
-      const diff = countLineDiff(snapshotText, currentText)
+      const diff = countLineDiff(snapshot.text ?? '', current.text ?? '')
       if (diff.additions > 0 || diff.deletions > 0) {
         stats.push({ path: rel, ...diff, status: 'modified' })
       }
@@ -381,6 +391,30 @@ async function readTextSafe(file: string): Promise<string | undefined> {
   } catch {
     return undefined
   }
+}
+
+/** One file read for diff stats: existence, text, and whether it is binary. */
+interface DiffFileRead {
+  readonly exists: boolean
+  readonly text?: string
+  readonly binary: boolean
+}
+
+/**
+ * Read a file for the stats loop without choking on huge binaries. Files over
+ * the snapshot size cap are marked binary and skipped without reading; smaller
+ * files are read once and a NUL byte anywhere marks them binary.
+ */
+async function readDiffFileSafe(file: string): Promise<DiffFileRead> {
+  try {
+    const info = await stat(file)
+    if (info.size > MAX_SNAPSHOT_FILE_BYTES) return { exists: true, binary: true }
+  } catch {
+    return { exists: false, binary: false }
+  }
+  const text = await readTextSafe(file)
+  if (text === undefined) return { exists: false, binary: false }
+  return { exists: true, text, binary: text.includes('\u0000') }
 }
 
 /** Compare a copy snapshot directory against the current workspace. */
@@ -653,10 +687,11 @@ export async function restoreSnapshot(
         )
       }
       if (record.untrackedDir !== undefined) {
-        const files = await listFiles(record.untrackedDir)
-        for (const file of files) {
-          await restoreCopyFile(record.untrackedDir, cwd, file)
-        }
+        const untrackedDir = record.untrackedDir
+        const files = await listFiles(untrackedDir)
+        await forEachWithConcurrency(files, COPY_CONCURRENCY, async (file) => {
+          await restoreCopyFile(untrackedDir, cwd, file)
+        })
       }
       if (options?.deleteNewFiles === true) {
         const snapshotUntracked = new Set(record.untrackedDir === undefined ? [] : await listFiles(record.untrackedDir))
@@ -699,10 +734,11 @@ export async function restoreSnapshot(
 
   if (record.dir === undefined) throw new Error('copy snapshot is missing directory')
   if (relPath === undefined) {
-    const snapshotFiles = await listFiles(record.dir)
-    for (const file of snapshotFiles) {
-      await restoreCopyFile(record.dir, cwd, file)
-    }
+    const snapshotDir = record.dir
+    const snapshotFiles = await listFiles(snapshotDir)
+    await forEachWithConcurrency(snapshotFiles, COPY_CONCURRENCY, async (file) => {
+      await restoreCopyFile(snapshotDir, cwd, file)
+    })
     if (options?.deleteNewFiles === true) {
       const snapshotSet = new Set(snapshotFiles)
       const currentFiles = await listFiles(cwd, snapshotRoot)
