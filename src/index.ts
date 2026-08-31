@@ -35,6 +35,7 @@ import {
   getSnapshot,
   getSnapshotStrict,
   listSnapshotSeqs,
+  readIndex,
   readSnapshotRecordFile,
   readWorkspaceFile,
   restoreSnapshot,
@@ -200,8 +201,8 @@ export function apply(ctx: Context, config: Config): void {
     void withSnapshotLock(session.id, async () => {
       try {
         const root = await ensureRoot(snapshotRoot)
-        const start = await getSnapshot(root, session.id)
-        await captureSnapshot(root, session.id, cwd, event.seq, start === undefined)
+        const index = await readIndex(root, session.id)
+        await captureSnapshot(root, session.id, cwd, event.seq, index.start === undefined, index)
       } catch (error: unknown) {
         ctx.logger.warn(`dsh-checkpoints: snapshot capture failed for ${session.id}: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -488,8 +489,8 @@ export function apply(ctx: Context, config: Config): void {
                 try {
                   await withSnapshotLock(sessionId, async () => {
                     const root = await ensureRoot(snapshotRoot)
-                    const start = await getSnapshot(root, sessionId)
-                    await captureSnapshot(root, sessionId, cwd, event.seq, start === undefined)
+                    const index = await readIndex(root, sessionId)
+                    await captureSnapshot(root, sessionId, cwd, event.seq, index.start === undefined, index)
                   })
                 } catch (error: unknown) {
                   ctx.logger.warn(`dsh-checkpoints: post-rewind snapshot capture failed: ${error instanceof Error ? error.message : String(error)}`)

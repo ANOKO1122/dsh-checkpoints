@@ -403,14 +403,25 @@ export function apply(ctx: Context): void {
 
   const offList = sessions.list.subscribe(sync)
 
-  const mo = new MutationObserver(() => {
+  const mo = new MutationObserver((mutations) => {
     if (scrollport !== null && !scrollport.isConnected) {
       teardown('conversation surface detached')
       sync()
       return
     }
-    if (scrollport === null) sync()
-    scheduleReconcile()
+    if (scrollport === null) {
+      sync()
+      return
+    }
+    // Only conversation-surface mutations need a reconcile; typing elsewhere
+    // (composer, sidebars, overlays) no longer schedules a full row scan.
+    for (const mutation of mutations) {
+      const target = mutation.target
+      if (target instanceof Node && (target === scrollport || scrollport.contains(target))) {
+        scheduleReconcile()
+        return
+      }
+    }
   })
   mo.observe(document.body, { childList: true, subtree: true })
 

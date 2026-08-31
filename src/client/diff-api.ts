@@ -81,13 +81,35 @@ async function readValue<T>(response: Response, fallbackMessage: string): Promis
   return envelope.value
 }
 
+/**
+ * In-flight dedupe for identical GETs: the round card, sidebar stats bar, and
+ * diff viewer can all request the same baseline/session within one burst. The
+ * first call performs the fetch; later calls share its promise and are removed
+ * when it settles, so a failed request is retried by the next caller.
+ */
+const inflightGets = new Map<string, Promise<unknown>>()
+
+async function getValue<T>(url: string, fallbackMessage: string): Promise<T> {
+  const existing = inflightGets.get(url)
+  if (existing !== undefined) return existing as Promise<T>
+  const request = (async (): Promise<T> => {
+    const response = await fetch(url, { headers: { accept: 'application/json' } })
+    return readValue<T>(response, fallbackMessage)
+  })()
+  inflightGets.set(url, request)
+  try {
+    return await request
+  } finally {
+    inflightGets.delete(url)
+  }
+}
+
 /** Per-file +/− stats between the baseline snapshot and the workspace. */
 export async function fetchDiff(sessionId: string, baseline: Baseline): Promise<DiffResponse> {
-  const response = await fetch(
+  return getValue<DiffResponse>(
     `/plugins/dsh-checkpoints/diff?sessionId=${encodeURIComponent(sessionId)}&baseline=${baseline}`,
-    { headers: { accept: 'application/json' } },
+    'failed to load file diff',
   )
-  return readValue<DiffResponse>(response, 'failed to load file diff')
 }
 
 /** Unified-diff hunks of one file between the baseline snapshot and the workspace. */
@@ -96,12 +118,11 @@ export async function fetchFileDetail(
   path: string,
   baseline: Baseline,
 ): Promise<FileDiffDetail> {
-  const response = await fetch(
+  return getValue<FileDiffDetail>(
     `/plugins/dsh-checkpoints/file-diff?sessionId=${encodeURIComponent(sessionId)}`
     + `&path=${encodeURIComponent(path)}&baseline=${baseline}`,
-    { headers: { accept: 'application/json' } },
+    'failed to load file comparison',
   )
-  return readValue<FileDiffDetail>(response, 'failed to load file comparison')
 }
 
 /** Restore one file from the baseline snapshot (per-file undo). */

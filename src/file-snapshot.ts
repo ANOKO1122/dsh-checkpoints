@@ -84,14 +84,26 @@ const IGNORED_DIRS = new Set([
   '.dsh', '.DS_Store', 'coverage', '.venv', 'venv', '__pycache__',
 ])
 
+/** Per-cwd memo of git-repo detection; one subprocess per workspace instead
+ *  of one per snapshot capture. A repo created later would need a restart to
+ *  be re-detected, which is an acceptable tradeoff for this plugin. */
+const gitRepoCache = new Map<string, Promise<boolean>>()
+
 /** Whether a directory is a Git repository (or inside one). */
 async function isGitRepo(cwd: string): Promise<boolean> {
-  try {
-    await execFileAsync('git', ['-C', cwd, 'rev-parse', '--is-inside-work-tree'], execOptions)
-    return true
-  } catch {
-    return false
-  }
+  const key = resolvePath(cwd)
+  const cached = gitRepoCache.get(key)
+  if (cached !== undefined) return cached
+  const result = (async (): Promise<boolean> => {
+    try {
+      await execFileAsync('git', ['-C', cwd, 'rev-parse', '--is-inside-work-tree'], execOptions)
+      return true
+    } catch {
+      return false
+    }
+  })()
+  gitRepoCache.set(key, result)
+  return result
 }
 
 /** Create a git snapshot object without touching index/worktree. */
@@ -138,8 +150,9 @@ async function listUntrackedFiles(cwd: string): Promise<string[]> {
 }
 
 /** Copy only untracked files into a snapshot directory. */
-async function copyUntrackedFiles(cwd: string, dest: string): Promise<void> {
-  const files = await listUntrackedFiles(cwd)
+async function copyUntrackedFiles(cwd: string, dest: string, skipPrefix?: string): Promise<void> {
+  const files = (await listUntrackedFiles(cwd))
+    .filter((rel) => !isInsideSkip(cwd, rel, skipPrefix))
   await forEachWithConcurrency(files, COPY_CONCURRENCY, async (rel) => {
     const source = join(cwd, rel)
     const target = join(dest, rel)
@@ -176,7 +189,7 @@ function indexFile(root: string, sessionId: string): string {
   return join(sessionDir(root, sessionId), 'index.json')
 }
 
-async function readIndex(root: string, sessionId: string): Promise<SnapshotIndex> {
+export async function readIndex(root: string, sessionId: string): Promise<SnapshotIndex> {
   try {
     const raw = await readFile(indexFile(root, sessionId), 'utf8')
     const parsed: unknown = JSON.parse(raw)
@@ -425,9 +438,10 @@ async function diffCopySnapshot(snapshotDir: string, cwd: string, skipPrefix?: s
 }
 
 /** Compare a hybrid snapshot's untracked-file copy against current untracked files. */
-async function diffUntrackedSnapshot(untrackedDir: string, cwd: string): Promise<FileDiffStat[]> {
+async function diffUntrackedSnapshot(untrackedDir: string, cwd: string, skipPrefix?: string): Promise<FileDiffStat[]> {
   const snapshotFiles = await listFiles(untrackedDir)
-  const currentUntracked = await listUntrackedFiles(cwd)
+  const currentUntracked = (await listUntrackedFiles(cwd))
+    .filter((rel) => !isInsideSkip(cwd, rel, skipPrefix))
   return diffPathSets(untrackedDir, cwd, snapshotFiles, currentUntracked)
 }
 
@@ -500,7 +514,8 @@ async function diffGitSnapshot(cwd: string, commit: string): Promise<FileDiffSta
 
 /**
  * Capture a snapshot of `cwd` for a checkpoint seq. Stores it in the session
- * index and returns the record (or undefined when there is no cwd).
+ * index and returns the record (or undefined when there is no cwd). Pass the
+ * already-read `index` when the caller has one to avoid parsing it twice.
  */
 export async function captureSnapshot(
   root: string | undefined,
@@ -508,12 +523,13 @@ export async function captureSnapshot(
   cwd: string | undefined,
   seq: number,
   isStart = false,
+  index?: SnapshotIndex,
 ): Promise<SnapshotRecord | undefined> {
   if (!cwd) return undefined
   const snapshotRoot = root ?? defaultSnapshotRoot()
-  const index = await readIndex(snapshotRoot, sessionId)
-  if (isStart && index.start !== undefined) return index.start
-  if (index.bySeq[seq] !== undefined) return index.bySeq[seq]
+  const current = index ?? await readIndex(snapshotRoot, sessionId)
+  if (isStart && current.start !== undefined) return current.start
+  if (current.bySeq[seq] !== undefined) return current.bySeq[seq]
 
   // Hybrid strategy (VS Code-like):
   // - Git repositories: use a git snapshot for tracked files, plus a copy of
@@ -525,7 +541,7 @@ export async function captureSnapshot(
     try {
       const commit = await createGitSnapshot(cwd)
       const untrackedDir = join(sessionDir(snapshotRoot, sessionId), 'snapshots', safeSegment(String(seq)), id, 'untracked')
-      await copyUntrackedFiles(cwd, untrackedDir)
+      await copyUntrackedFiles(cwd, untrackedDir, snapshotRoot)
       await pinGitSnapshot(
         cwd,
         commit,
@@ -545,9 +561,9 @@ export async function captureSnapshot(
   }
 
   if (isStart) {
-    await writeIndex(snapshotRoot, sessionId, { start: record, bySeq: { ...index.bySeq, [seq]: record } })
+    await writeIndex(snapshotRoot, sessionId, { start: record, bySeq: { ...current.bySeq, [seq]: record } })
   } else {
-    await writeIndex(snapshotRoot, sessionId, { start: index.start, bySeq: { ...index.bySeq, [seq]: record } })
+    await writeIndex(snapshotRoot, sessionId, { start: current.start, bySeq: { ...current.bySeq, [seq]: record } })
   }
   return record
 }
@@ -767,7 +783,8 @@ export async function diffSnapshotToWorkspace(
   cwd: string,
   seq?: number,
 ): Promise<FileDiffStat[]> {
-  const record = await getSnapshot(root, sessionId, seq)
+  const snapshotRoot = root ?? defaultSnapshotRoot()
+  const record = await getSnapshot(snapshotRoot, sessionId, seq)
   if (record === undefined) return []
   if (record.kind === 'git' && record.commit !== undefined) {
     return diffGitSnapshot(cwd, record.commit)
@@ -776,7 +793,7 @@ export async function diffSnapshotToWorkspace(
     const tracked = await diffGitSnapshot(cwd, record.commit)
     const untracked = record.untrackedDir === undefined
       ? []
-      : await diffUntrackedSnapshot(record.untrackedDir, cwd)
+      : await diffUntrackedSnapshot(record.untrackedDir, cwd, snapshotRoot)
     const byPath = new Map<string, FileDiffStat>()
     for (const stat of [...tracked, ...untracked]) {
       const existing = byPath.get(stat.path)
@@ -787,7 +804,7 @@ export async function diffSnapshotToWorkspace(
     return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path))
   }
   if (record.kind === 'copy' && record.dir !== undefined) {
-    return diffCopySnapshot(record.dir, cwd)
+    return diffCopySnapshot(record.dir, cwd, snapshotRoot)
   }
   return []
 }
