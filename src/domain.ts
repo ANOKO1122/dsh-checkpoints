@@ -9,8 +9,8 @@
  * durable history.
  */
 
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { SessionSeq, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { createSystemMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 
 /** One checkpoint row shown in the UI. */
 export interface Checkpoint {
@@ -40,7 +40,7 @@ export function textOfUserMessage(event: SessionEvent<'user/message'>): string {
 export function listCheckpoints(session: Session): Checkpoint[] {
   const result: Checkpoint[] = []
   for (const seq of session.surface.nodes) {
-    const event = session.events[seq]
+    const event = session.eventAt(seq)
     if (event === undefined || event.type !== 'user/message') continue
     if (event.data.source.kind !== 'user') continue
     result.push({ seq, time: event.time, text: textOfUserMessage(event) })
@@ -51,9 +51,9 @@ export function listCheckpoints(session: Session): Checkpoint[] {
 /** Replace the surface range `[startSeq, endSeq]` with a new user message. */
 function replaceRangeWithUser(
   session: Session,
-  startSeq: number,
-  endSeq: number,
-  shadowedSeqs: readonly number[],
+  startSeq: SessionSeq,
+  endSeq: SessionSeq,
+  shadowedSeqs: readonly SessionSeq[],
   content: readonly ContentBlock[],
 ): SessionEvent<'user/message'> {
   const message = createUserMessage({
@@ -61,72 +61,32 @@ function replaceRangeWithUser(
     source: { kind: 'user' },
   })
   return session.append('user/message', message, {
-    surfaceOp: { op: 'replace', start: startSeq, end: endSeq },
-    sourceEventSeqs: [...shadowedSeqs],
-  })
-}
-
-/** Replace the surface range with a copy of an existing assistant message. */
-function replaceRangeWithAssistant(
-  session: Session,
-  anchor: SessionEvent<'assistant/message'>,
-  startSeq: number,
-  endSeq: number,
-  shadowedSeqs: readonly number[],
-): SessionEvent<'assistant/message'> {
-  const data = anchor.data
-  const message = createAssistantMessage({
-    content: [...data.message.content],
-    source: {
-      provider: data.message.source.provider,
-      model: data.message.source.model,
-      ...(data.message.source.replayState === undefined ? {} : { replayState: data.message.source.replayState }),
-    },
-  })
-  return session.append('assistant/message', {
-    turn: data.turn,
-    step: data.step,
-    message,
-    ...(data.usage === undefined ? {} : { usage: data.usage }),
-  }, {
-    surfaceOp: { op: 'replace', start: startSeq, end: endSeq },
-    sourceEventSeqs: [...shadowedSeqs],
+    surfaceOp: { op: 'replace', startSeq, endSeq },
+    sourceEventSeqs: shadowedSeqs.slice(),
   })
 }
 
 /**
- * Replace the surface range with an empty assistant message.
+ * Replace a visible range with an empty system message.
  *
- * This is the "delete to empty" fallback for recalling the first visible
- * message: a surface replacement must insert one node, and when there is no
- * earlier user/assistant message to copy as the anchor, an empty assistant
- * message still satisfies the fold. Because empty assistant messages derive to
- * no model-visible message, the resulting transcript is empty and the chat view
- * renders nothing for the replacement node.
+ * Empty system messages derive to no model-visible message, while unlike an
+ * assistant message they may cite every shadowed surface node as provenance.
  */
-function replaceRangeWithEmptyAssistant(
+function replaceRangeWithEmptySystem(
   session: Session,
-  startSeq: number,
-  endSeq: number,
-  shadowedSeqs: readonly number[],
-): SessionEvent<'assistant/message'> {
-  const message = createAssistantMessage({
-    content: [],
-    source: {
-      provider: 'dsh-checkpoints',
-      model: 'recall-empty',
-    },
-  })
-  return session.append('assistant/message', {
+  startSeq: SessionSeq,
+  endSeq: SessionSeq,
+  shadowedSeqs: readonly SessionSeq[],
+): SessionEvent<'system/message'> {
+  return session.append('system/message', {
     turn: 0,
     step: 0,
-    message,
+    message: createSystemMessage('', 'dsh-checkpoints'),
   }, {
-    surfaceOp: { op: 'replace', start: startSeq, end: endSeq },
-    sourceEventSeqs: [...shadowedSeqs],
+    surfaceOp: { op: 'replace', startSeq, endSeq },
+    sourceEventSeqs: shadowedSeqs.slice(),
   })
 }
-
 /**
  * Roll the visible conversation back to a checkpoint: keep that user
  * instruction as the last visible message and shadow everything after it.
@@ -134,12 +94,13 @@ function replaceRangeWithEmptyAssistant(
  * @returns the appended replacement event.
  */
 export function rewindToCheckpoint(session: Session, checkpointSeq: number): SessionEvent<'user/message'> {
+  const targetSeq = SessionSeq(checkpointSeq)
   const nodes = [...session.surface.nodes]
-  const startIndex = nodes.indexOf(checkpointSeq)
+  const startIndex = nodes.indexOf(targetSeq)
   if (startIndex === -1) {
     throw new Error(`checkpoint ${checkpointSeq} is not in the current visible conversation`)
   }
-  const target = session.events[checkpointSeq]
+  const target = session.eventAt(targetSeq)
   if (target === undefined || target.type !== 'user/message' || target.data.source.kind !== 'user') {
     throw new Error(`checkpoint ${checkpointSeq} is not a real user instruction`)
   }
@@ -147,7 +108,7 @@ export function rewindToCheckpoint(session: Session, checkpointSeq: number): Ses
   if (endSeq === undefined) throw new Error('conversation has no visible messages')
   return replaceRangeWithUser(
     session,
-    checkpointSeq,
+    targetSeq,
     endSeq,
     nodes.slice(startIndex),
     target.data.content,
@@ -159,62 +120,33 @@ export function rewindToCheckpoint(session: Session, checkpointSeq: number): Ses
  * removed instruction text so the UI can put it back into the composer for
  * editing. This is the "edit a sent message" path.
  *
- * Implementation detail: because a surface replacement must insert one node,
- * the rewrite is anchored at the closest earlier user/assistant node and that
- * node is copied into place. The result is the visible conversation ending at
- * that earlier node, with the target instruction and all later messages gone.
+ * Implementation detail: an empty system message replaces the target range.
+ * DSH projects empty system content to no model-visible message, while the
+ * replacement still cites every shadowed node through sourceEventSeqs.
  */
 export function recallUserMessage(
   session: Session,
   checkpointSeq: number,
-): { removedText: string; event: SessionEvent } {
+): { removedText: string; event: SessionEvent<'system/message'> } {
+  const targetSeq = SessionSeq(checkpointSeq)
   const nodes = [...session.surface.nodes]
-  const targetIndex = nodes.indexOf(checkpointSeq)
+  const targetIndex = nodes.indexOf(targetSeq)
   if (targetIndex === -1) {
     throw new Error(`checkpoint ${checkpointSeq} is not in the current visible conversation`)
   }
-  const target = session.events[checkpointSeq]
+  const target = session.eventAt(targetSeq)
   if (target === undefined || target.type !== 'user/message' || target.data.source.kind !== 'user') {
     throw new Error(`checkpoint ${checkpointSeq} is not a real user instruction`)
   }
   const removedText = textOfUserMessage(target)
-
-  // Find the closest preceding user/assistant node to use as the replacement anchor.
-  let anchorIndex = targetIndex - 1
-  while (anchorIndex >= 0) {
-    const seq = nodes[anchorIndex]
-    if (seq === undefined) break
-    const event = session.events[seq]
-    if (event?.type === 'user/message' || event?.type === 'assistant/message') break
-    anchorIndex--
-  }
-  if (anchorIndex < 0) {
-    // First message (or no earlier user/assistant anchor): replace the target
-    // and everything after it with an empty assistant message. The empty
-    // assistant derives to no model-visible message, so the transcript is
-    // effectively cleared and the edited message can be re-sent normally.
-    const endSeq = nodes[nodes.length - 1]
-    if (endSeq === undefined) throw new Error('conversation has no visible messages')
-    const shadowed = nodes.slice(targetIndex)
-    const event = replaceRangeWithEmptyAssistant(session, checkpointSeq, endSeq, shadowed)
-    return { removedText, event }
-  }
-
-  const anchorSeq = nodes[anchorIndex]
-  if (anchorSeq === undefined) throw new Error('internal error: missing anchor seq')
-  const endSeq = nodes[nodes.length - 1]
+  const endSeq = nodes.at(-1)
   if (endSeq === undefined) throw new Error('conversation has no visible messages')
-  const shadowed = nodes.slice(anchorIndex)
-  const anchorEvent = session.events[anchorSeq]
 
-  let event: SessionEvent
-  if (anchorEvent?.type === 'user/message') {
-    event = replaceRangeWithUser(session, anchorSeq, endSeq, shadowed, anchorEvent.data.content)
-  } else if (anchorEvent?.type === 'assistant/message') {
-    event = replaceRangeWithAssistant(session, anchorEvent, anchorSeq, endSeq, shadowed)
-  } else {
-    throw new Error('internal error: anchor is neither user nor assistant message')
-  }
-
+  const event = replaceRangeWithEmptySystem(
+    session,
+    targetSeq,
+    endSeq,
+    nodes.slice(targetIndex),
+  )
   return { removedText, event }
 }

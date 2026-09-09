@@ -19,11 +19,8 @@ const PLATFORM_MODULES = [
   '@deepseek-ai/dsh-client-schema-form',
 ]
 
-/** Runtime store engine: documented exemption, external at runtime. */
-const RUNTIME_STORE_EXEMPTION = '@deepseek-ai/dsh-client-runtime/client'
-
 /** Externals resolved from the loader module table. */
-const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES, RUNTIME_STORE_EXEMPTION]
+const CLIENT_EXTERNALS: readonly string[] = PLATFORM_MODULES
 
 /** Wire/type layers a client bundle may inline (no shared runtime identity). */
 const INLINE_SAFE = /^@deepseek-ai\/dsh-(host-apiproxy|session|llm|tools|brand)(\/|$)/
@@ -52,13 +49,15 @@ const config: UserConfig = {
   dts: false,
   sourcemap: true,
   clean: false,
-  external: [...CLIENT_EXTERNALS],
   define: {
     'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
     'import.meta.env.MODE': JSON.stringify(process.env.NODE_ENV ?? 'production'),
     'import.meta.env': JSON.stringify({ MODE: process.env.NODE_ENV ?? 'production' }),
   },
-  noExternal: (id: string) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
+  deps: {
+    neverBundle: [...CLIENT_EXTERNALS],
+    alwaysBundle: (id: string) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
+  },
   plugins: [{
     name: 'dsh-client-bundle-purity',
     resolveId(source: string) {

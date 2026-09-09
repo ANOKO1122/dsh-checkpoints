@@ -24,9 +24,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isAbsolute } from 'node:path'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session'
-import { foldSurface } from '@deepseek-ai/dsh-session/surface'
 import type {} from '@deepseek-ai/dsh-agent'
 import { listCheckpoints, recallUserMessage, rewindToCheckpoint } from './domain.ts'
+import { shadowedSeqsForSession } from './surface-cache.ts'
 import { diffToHunks, looksBinary, MAX_DIFF_TEXT_CHARS } from './file-diff.ts'
 import {
   captureSnapshot,
@@ -259,12 +259,9 @@ export function apply(ctx: Context, config: Config): void {
             sendError(res, 404, 'SESSION_NOT_FOUND', `session "${sessionId}" not found`)
             return
           }
-          const shadowedSeqs: number[] = []
+          let shadowedSeqs: readonly number[]
           try {
-            const folded = foldSurface(session.events)
-            for (const replacement of folded.replacements) {
-              shadowedSeqs.push(...replacement.shadowedSeqs)
-            }
+            shadowedSeqs = shadowedSeqsForSession(session)
           } catch (error: unknown) {
             ctx.logger.warn(`dsh-checkpoints: surface fold unavailable: ${error instanceof Error ? error.message : String(error)}`)
             sendError(res, 422, 'SURFACE_FOLD_FAILED', error instanceof Error ? error.message : String(error))
