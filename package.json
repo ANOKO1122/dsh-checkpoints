@@ -1,6 +1,6 @@
 {
   "name": "dsh-checkpoints",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "DSH conversation checkpoints: list every user instruction, jump/scroll to it, roll the visible conversation back to it (optionally with file snapshots), recall/edit sent instructions, show this round's file changes inline under the conversation, and a VS Code-like diff viewer (unified/side-by-side) with per-file undo.",
   "type": "module",
   "main": "lib/index.js",
@@ -35,7 +35,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && tsdown",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --tsconfig tsconfig.client.json --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit"
   },
   "peerDependencies": {

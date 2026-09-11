@@ -16,12 +16,14 @@ export async function commitCheckpointRewrite<T>(
   flush: (session: Session) => Promise<boolean>,
   rewrite: () => T,
 ): Promise<T> {
+  const revision = session.seq
   const save = async (committed: boolean): Promise<void> => {
     try {
       if (!await flush(session)) throw new Error('没有参与保存的会话持久化监听器')
     } catch (cause) { throw new CheckpointSaveError(committed, cause) }
   }
   await save(false)
+  if (session.seq !== revision) throw new Error('会话已更新，请刷新检查点后重试；未执行回退。')
   const result = rewrite()
   await save(true)
   return result

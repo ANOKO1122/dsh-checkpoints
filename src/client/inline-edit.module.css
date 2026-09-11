@@ -62,6 +62,14 @@
   min-width: 0;
 }
 
+.rollbackRow {
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary, #888);
+}
+
 .actions {
   display: flex;
   align-items: center;

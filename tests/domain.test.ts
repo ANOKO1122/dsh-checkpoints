@@ -113,7 +113,7 @@ test('rewinds to a checkpoint with a valid typed surface replacement', () => {
   assert.deepEqual(session.surface.nodes, [session.seq - 1])
 })
 
-test('recalling the first user message leaves an empty visible transcript', () => {
+test('recalling the first user message leaves only a plugin notice, not a user checkpoint', () => {
   const session = Session.create(SessionId('checkpoint-recall-first'))
   const first = appendUser(session, 'edit me')
   appendAssistant(session, 'old answer')
@@ -121,7 +121,10 @@ test('recalling the first user message leaves an empty visible transcript', () =
   const result = recallUserMessage(session, first.seq)
 
   assert.equal(result.removedText, 'edit me')
-  assert.deepEqual(session.deriveMessages(), [])
+  assert.deepEqual(listCheckpoints(session), [])
+  assert.equal(session.deriveMessages().length, 1)
+  assert.equal(session.deriveMessages()[0]?.source.kind, 'plugin')
+  assert.ok(!JSON.stringify(session.deriveMessages()).includes('edit me'))
 })
 
 test('recalling a later instruction preserves all earlier visible messages', () => {
@@ -132,10 +135,20 @@ test('recalling a later instruction preserves all earlier visible messages', () 
 
   const result = recallUserMessage(session, recalled.seq)
 
-  assert.equal(result.event.type, 'system/message')
+  assert.equal(result.event.type, 'user/message')
   assert.deepEqual(
     session.deriveMessages().map(message => message.role),
-    ['user', 'assistant'],
+    ['user', 'assistant', 'user'],
   )
   assert.deepEqual(listCheckpoints(session).map(row => row.text), ['first'])
+})
+
+test('a session update during preflight refuses the rewrite', async () => {
+  const session = Session.create(SessionId('preflight-race'))
+  const target = appendUser(session, 'original')
+  await assert.rejects(commitCheckpointRewrite(session, async () => {
+    appendUser(session, 'new input')
+    return true
+  }, () => recallUserMessage(session, target.seq)), /会话已更新/)
+  assert.deepEqual(listCheckpoints(session).map(row => row.text), ['original', 'new input'])
 })

@@ -15,12 +15,15 @@
  *     registered as its own `shell.overlay` slot entry.
  */
 
-import { createElement, type ReactNode } from 'react'
+import { createElement, Fragment, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { Context, ConversationFace, ModelDirectoryFace, ModelDirectoriesFace, SessionListState } from './context-types.ts'
 import { DiffViewerOverlay } from './diff-viewer.tsx'
 import type { InlineEditImage } from './inline-edit.tsx'
 import { InlineEdit } from './inline-edit.tsx'
+import { loadRequiredImages } from './required-images.ts'
+import { createLatestRequest } from './latest-request.ts'
+import { DraftRecovery, announceDraftChange } from './draft-recovery.tsx'
 import { adaptSessions } from './runtime-session.ts'
 import { reconcileMessageActions, type MessageImageRef } from './message-actions.ts'
 import { RoundChangesCard } from './round-changes-card.tsx'
@@ -112,6 +115,7 @@ export function apply(ctx: Context): void {
   let editingKey: string | null = null
   /** Open-generation token: stale async image loads must not mount over a newer editor. */
   let editOpenSeq = 0
+  const surfaceRequests = createLatestRequest()
 
   const collectHiddenKeys = (seq: number, inclusive: boolean): Set<string> => {
     const keys = new Set<string>()
@@ -138,6 +142,7 @@ export function apply(ctx: Context): void {
   }
 
   const closeInlineEditor = (restoreRow: boolean): void => {
+    editOpenSeq++
     if (editRoot !== null) {
       editRoot.unmount()
       editRoot = null
@@ -147,9 +152,11 @@ export function apply(ctx: Context): void {
     if (editRow !== null && restoreRow) editRow.style.display = ''
     editRow = null
     editingKey = null
+    announceDraftChange()
   }
 
   const teardown = (reason: string): void => {
+    surfaceRequests.invalidate()
     console.warn(`[dsh-checkpoints] teardown: ${reason}`)
     if (reconcileTimer !== undefined) window.clearTimeout(reconcileTimer)
     reconcileTimer = undefined
@@ -162,51 +169,19 @@ export function apply(ctx: Context): void {
     shadowedSeqs = null
   }
 
-  /** Set the composer draft for a session; false when the service is absent. */
-  const setDraftFor = (sessionId: string, text: string): boolean => {
-    try {
-      const scope = sessions.scope(sessionId)
-      const conversation = ctx.get('conversation') as { input: { for(actx: unknown): { setDraft(text: string): void } } } | undefined
-      if (scope !== undefined && conversation !== undefined) {
-        conversation.input.for(scope).setDraft(text)
-        return true
-      }
-      return false
-    } catch (error) {
-      console.warn('[dsh-checkpoints] failed to set composer draft:', error)
-      return false
-    }
-  }
-
-  /** Submit the composer draft for a session; false when the service is absent. */
-  const submitFor = (sessionId: string): boolean => {
-    try {
-      const scope = sessions.scope(sessionId)
-      const conversation = ctx.get('conversation') as { input: { for(actx: unknown): { submit(): void } } } | undefined
-      if (scope !== undefined && conversation !== undefined) {
-        conversation.input.for(scope).submit()
-        return true
-      }
-      return false
-    } catch (error) {
-      console.warn('[dsh-checkpoints] failed to submit composer:', error)
-      return false
-    }
-  }
 
   /**
    * Fetch a sent message's images back as browser files so the inline editor
    * can show them (and re-send them) like pre-send composer drafts.
-   * Failures degrade to a text-only edit for that image.
+   * A missing image stops the editor opening; no silent text-only fallback.
    */
   const loadEditImages = async (sessionId: string, imageRefs: readonly MessageImageRef[]): Promise<InlineEditImage[]> => {
     if (imageRefs.length === 0) return []
     const binding = sessions.binding(sessionId)
-    if (binding === undefined || binding.session.readAttachment === undefined) return []
-    const loaded = await Promise.all(imageRefs.map(async (ref): Promise<InlineEditImage | null> => {
-      try {
+    if (binding === undefined || binding.session.readAttachment === undefined) throw new Error('当前会话不支持读取原图片，已停止编辑，对话未回退。')
+    return loadRequiredImages(imageRefs, async (ref): Promise<InlineEditImage> => {
         const result = await binding.session.readAttachment!(ref.attachmentId)
-        if (!result.ok || result.value === undefined) return null
+        if (!result.ok || result.value === undefined) throw new Error('图片读取失败')
         const mediaType = ref.mediaType ?? result.value.attachment.mediaType ?? 'image/png'
         const extension = mediaType.split('/')[1] ?? 'png'
         // Copy into a plain-ArrayBuffer view: the wire bytes may be typed
@@ -214,18 +189,16 @@ export function apply(ctx: Context): void {
         const bytes = new Uint8Array(result.value.data)
         const file = new File([bytes], `image.${extension}`, { type: mediaType })
         return { file, previewUrl: URL.createObjectURL(file) }
-      } catch (cause) {
-        console.warn('[dsh-checkpoints] edit image load failed:', cause)
-        return null
-      }
-    }))
-    return loaded.filter((image): image is InlineEditImage => image !== null)
+    }, image => URL.revokeObjectURL(image.previewUrl))
   }
 
   const openInlineEditor = (sessionId: string, seq: number, text: string, imageRefs: readonly MessageImageRef[], row: HTMLElement, key: string): void => {
     closeInlineEditor(true)
 
     const openSeq = ++editOpenSeq
+    const draftKey = `dsh-checkpoints:edit:${sessionId}:${seq}`
+    let recalled: RecallResult | undefined
+    let sendUncertain = false
     editingKey = key
     editRow = row
     row.style.display = 'none'
@@ -239,61 +212,44 @@ export function apply(ctx: Context): void {
       editRoot.render(createElement(InlineEdit, {
         sessionId,
         initialText: text,
+        draftKey,
         initialImages: images,
         modelDirectory: modelDirectoryFor(sessionId),
-        onSubmit: async (editedText, _selection, files) => {
-          // 1) Ask about file rollback before touching the conversation.
-          const rollbackFiles = window.confirm(
-            '是否同时回退代码改动到该消息之前？\n\n'
-            + '“确定”= 对话和代码一起回退；\n'
-            + '“取消”= 只重写对话，代码保持现状。',
-          )
-          // 2) Remove the original instruction and everything after it.
-          const recallResult = await postRecall(sessionId, seq, { rollbackFiles, deleteNewFiles: false })
-          // 3) Keep the old rows hidden until the replacement surface commits.
-          hiddenKeys = collectHiddenKeys(seq, true)
-          refreshShadowedSeqs(sessionId)
-          closeInlineEditor(false)
-          // 4) Re-register the kept images as fresh composer drafts, then send
-          // text + images together through the ordinary composer submit path.
-          let restoredImages = 0
-          let imageProblem: string | undefined
-          if (files.length > 0) {
-            try {
-              const conversation = ctx.get('conversation') as ConversationFace | undefined
-              const scope = sessions.scope(sessionId)
-              const input = conversation !== undefined && scope !== undefined ? conversation.input.for(scope) : undefined
-              const drafts = conversation?.createDrafts?.(sessionId, files) ?? conversation?.createDraftImages?.(files) ?? []
-              const ids = drafts.map(attachment => attachment.id)
-              if (ids.length > 0 && (input?.addAttachments?.(ids) ?? input?.addImages?.(ids))) {
-                restoredImages = ids.length
-              }
-            } catch (cause) {
-              console.warn('[dsh-checkpoints] failed to restore edit images:', cause)
+        onSubmit: async (editedText, _selection, files, rollbackFiles) => {
+          if (sendUncertain) throw new Error('上次发送的结果尚不确定，请先核对会话，避免重复发送。文字和图片仍保留在编辑器。')
+          const conversation = ctx.get('conversation') as ConversationFace | undefined
+          const rawBinding = ctx.sessions.binding(sessionId)
+          if (!conversation?.sendSession || !rawBinding) throw new Error('当前 Harness 缺少有回执的发送接口，未执行新的回退。')
+          const drafts = files.length ? (conversation.createDrafts?.(sessionId, files) ?? conversation.createDraftImages?.(files) ?? []) : []
+          if (drafts.length !== files.length) {
+            conversation.releaseDraftAttachments?.(drafts)
+            throw new Error('图片准备不完整，未执行新的回退。请重试。')
+          }
+          try {
+            if (openSeq !== editOpenSeq) throw new Error('编辑已关闭，未执行新的回退。')
+            recalled ??= await postRecall(sessionId, seq, { rollbackFiles, deleteNewFiles: false })
+            if (boundSessionId === sessionId) {
+              hiddenKeys = collectHiddenKeys(seq, true)
+              refreshShadowedSeqs(sessionId)
             }
-            if (restoredImages !== files.length) {
-              imageProblem = `有 ${files.length - restoredImages} 张图片未能恢复，编辑后的消息将不包含它们。`
+            if (recalled.filesRestored === false) {
+              throw new Error(`对话已回退，但文件恢复失败，已停止自动发送。${recalled.fileError ?? '文件可能部分恢复。'} 文字和图片保留在编辑器；请先处理文件状态。`)
             }
-          }
-          const draftSet = setDraftFor(sessionId, editedText)
-          await new Promise<void>((resolve) => { window.setTimeout(resolve, 0) })
-          const submitted = draftSet && imageProblem === undefined && submitFor(sessionId)
-          scheduleReconcile()
-          // 5) The conversation has already been rewound at this point, so any
-          // late failure must be reported instead of silently dropping either
-          // the file rollback or the edited content.
-          const problems: string[] = []
-          if (recallResult.filesRestored === false) {
-            problems.push(`文件回退失败：${recallResult.fileError ?? '未知原因'}\n（对话已回退，文件保持现状）`)
-          }
-          if (imageProblem !== undefined) problems.push(imageProblem)
-          if (!submitted || (editedText.trim() === '' && files.length > 0 && restoredImages === 0)) {
-            problems.push(`编辑内容未能自动发送，请手动粘贴到输入框发送：\n\n${editedText}`)
-          }
-          if (problems.length > 0) {
-            window.alert(problems.join('\n\n———\n\n'))
+            if (openSeq !== editOpenSeq) throw new Error('对话已回退，编辑已关闭，未发送新消息。')
+            sendUncertain = true
+            const outcome = await conversation.sendSession(rawBinding.session, editedText, drafts.map(item => item.id), 'queue')
+            sendUncertain = false
+            if (outcome.kind !== 'success') throw new Error(outcome.text ?? '发送被拒绝，编辑内容已保留，可重试；不会重复回退文件。')
+            try { sessionStorage.removeItem(draftKey); announceDraftChange() } catch { /* best effort */ }
+            if (openSeq === editOpenSeq) closeInlineEditor(false)
+            scheduleReconcile()
+          } catch (cause) {
+            if (!sendUncertain) conversation.releaseDraftAttachments?.(drafts)
+            throw cause
           }
         },
+        /* Legacy composer submission intentionally removed: submit() is void,
+         * so it cannot confirm Host admission or safely dispose the editor. */
         onCancel: () => {
           closeInlineEditor(true)
           scheduleReconcile()
@@ -301,16 +257,24 @@ export function apply(ctx: Context): void {
       }))
     }
 
-    // Historical images load first so the editor mounts once, with thumbnails
-    // already in place (text-only edits resolve immediately).
-    void loadEditImages(sessionId, imageRefs).then((images) => {
-      if (openSeq !== editOpenSeq || editHost === null) {
-        // Superseded by a newer open/close: discard the fetched previews.
-        for (const image of images) URL.revokeObjectURL(image.previewUrl)
-        return
-      }
-      mount(images)
-    })
+    const load = (): void => {
+      void loadEditImages(sessionId, imageRefs).then((images) => {
+        if (openSeq !== editOpenSeq || editHost === null) {
+          for (const image of images) URL.revokeObjectURL(image.previewUrl)
+          return
+        }
+        editRoot?.unmount()
+        mount(images)
+      }).catch(cause => {
+        if (openSeq !== editOpenSeq || editHost === null) return
+        editRoot ??= createRoot(editHost)
+        editRoot.render(createElement('div', { role: 'alert' },
+          createElement('p', null, cause instanceof Error ? cause.message : String(cause)),
+          createElement('button', { type: 'button', onClick: load }, '重试加载图片'),
+          createElement('button', { type: 'button', onClick: () => closeInlineEditor(true) }, '取消编辑')))
+      })
+    }
+    load()
   }
 
   function scheduleReconcile(): void {
@@ -330,7 +294,9 @@ export function apply(ctx: Context): void {
   }
 
   function refreshShadowedSeqs(sessionId: string): void {
+    const isLatest = surfaceRequests.begin()
     void fetchShadowedSeqs(sessionId).then((seqs) => {
+      if (!isLatest() || boundSessionId !== sessionId) return
       shadowedSeqs = seqs
       scheduleReconcile()
     }).catch((cause: unknown) => {
@@ -369,7 +335,16 @@ export function apply(ctx: Context): void {
     if (sessionId === undefined) return null
     const binding = sessions.binding(sessionId)
     if (binding === undefined) return null
-    return createElement(RoundChangesCard, { sessionId, session: binding.session })
+    return createElement(Fragment, null,
+      createElement(RoundChangesCard, { sessionId, session: binding.session }),
+      createElement(DraftRecovery, { sessionId, isEditing: () => boundSessionId === sessionId && editingKey !== null,
+        restore: text => {
+          const scope = sessions.scope(sessionId)
+          const conversation = ctx.get('conversation') as ConversationFace | undefined
+          if (scope && conversation) conversation.input.for(scope).setDraft(text)
+          else window.alert('当前输入框不可用，草稿仍保留，请重新打开会话后重试。')
+        },
+      }))
   }
 
   // Sidebar toggle in the left nav footer + the docked right-hand panel.

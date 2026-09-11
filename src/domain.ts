@@ -2,7 +2,7 @@
  * Pure conversation-checkpoint operations for dsh-checkpoints.
  *
  * DSH session logs are append-only. This plugin never rewrites or deletes
- * old events; it appends `user/message` / `assistant/message` events with a
+ * old events; it appends user instructions or plugin-owned `user/message` notices with a
  * `surfaceOp: { op: 'replace', ... }` marker so the *visible* model surface
  * collapses to the requested checkpoint. The original events stay in the log,
  * which is the DSH-sanctioned way to implement a "rewind" without mutating
@@ -10,7 +10,7 @@
  */
 
 import { SessionSeq, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { createSystemMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 
 /** One checkpoint row shown in the UI. */
 export interface Checkpoint {
@@ -67,22 +67,20 @@ function replaceRangeWithUser(
 }
 
 /**
- * Replace a visible range with an empty system message.
- *
- * Empty system messages derive to no model-visible message, while unlike an
- * assistant message they may cite every shadowed surface node as provenance.
+ * Between-turn recall uses user-role plugin context: system and assistant
+ * events require an open step. This nonempty notice is provider-compatible,
+ * is not a user checkpoint, and does not wake a model run.
  */
-function replaceRangeWithEmptySystem(
+function replaceRangeWithRecallNotice(
   session: Session,
   startSeq: SessionSeq,
   endSeq: SessionSeq,
   shadowedSeqs: readonly SessionSeq[],
-): SessionEvent<'system/message'> {
-  return session.append('system/message', {
-    turn: 0,
-    step: 0,
-    message: createSystemMessage('', 'dsh-checkpoints'),
-  }, {
+): SessionEvent<'user/message'> {
+  return session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: '[dsh-checkpoints: the user recalled the following conversation range. Await the next user instruction.]' }],
+    source: { kind: 'plugin', plugin: 'dsh-checkpoints', form: 'notice', summary: '已撤回消息及其后续对话' },
+  }), {
     surfaceOp: { op: 'replace', startSeq, endSeq },
     sourceEventSeqs: shadowedSeqs.slice(),
   })
@@ -122,21 +120,20 @@ export function rewindToCheckpoint(session: Session, checkpointSeq: number): Ses
  * removed instruction text so the UI can put it back into the composer for
  * editing. This is the "edit a sent message" path.
  *
- * Implementation detail: an empty system message replaces the target range.
- * DSH projects empty system content to no model-visible message, while the
- * replacement still cites every shadowed node through sourceEventSeqs.
+ * A plugin notice replaces the range without fabricating an execution step.
+ * Original messages remain in the append-only log, not the active surface.
  */
 export function recallUserMessage(
   session: Session,
   checkpointSeq: number,
-): { removedText: string; event: SessionEvent<'system/message'> } {
+): { removedText: string; event: SessionEvent<'user/message'> | SessionEvent<'system/message'> } {
   const targetSeq = SessionSeq(checkpointSeq)
   const nodes = [...session.surface.nodes]
   const targetIndex = nodes.indexOf(targetSeq)
   if (targetIndex === -1) {
     const retried = retryReplacement(session, targetSeq, 'recall')
     const original = session.eventAt(targetSeq)
-    if (retried?.type === 'system/message' && original?.type === 'user/message') {
+    if ((retried?.type === 'system/message' || retried?.type === 'user/message') && original?.type === 'user/message') {
       return { removedText: textOfUserMessage(original), event: retried }
     }
     throw new Error(`checkpoint ${checkpointSeq} is not in the current visible conversation`)
@@ -149,7 +146,7 @@ export function recallUserMessage(
   const endSeq = nodes.at(-1)
   if (endSeq === undefined) throw new Error('conversation has no visible messages')
 
-  const event = replaceRangeWithEmptySystem(
+  const event = replaceRangeWithRecallNotice(
     session,
     targetSeq,
     endSeq,
@@ -172,6 +169,8 @@ function retryReplacement(session: Session, targetSeq: SessionSeq, mode: 'recall
     if (message.source.kind === 'plugin' && message.source.plugin === 'dsh-checkpoints'
       && message.content.every(block => block.type === 'text' && block.text === '')) return tail
   }
+  if (mode === 'recall' && tail.type === 'user/message'
+    && tail.data.source.kind === 'plugin' && tail.data.source.plugin === 'dsh-checkpoints') return tail
   if (mode === 'rewind' && tail.type === 'user/message' && tail.data.source.kind === 'user'
     && JSON.stringify(tail.data.content) === JSON.stringify(original.data.content)) return tail
   return undefined

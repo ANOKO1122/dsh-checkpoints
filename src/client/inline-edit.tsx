@@ -18,6 +18,7 @@ import type {
   ModelDirectoryFace, ModelDirectoryState, ModelInfo, ModelSelection,
 } from './context-types.ts'
 import css from './inline-edit.module.css'
+import { announceDraftChange } from './draft-recovery.tsx'
 
 const EMPTY_STATE: ModelDirectoryState = {
   current: null,
@@ -38,11 +39,12 @@ const IMAGE_TYPES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'im
 export interface InlineEditProps {
   readonly sessionId: string
   readonly initialText: string
+  readonly draftKey?: string
   /** Images carried over from the original message (deletable, like pre-send). */
   readonly initialImages?: readonly InlineEditImage[]
   readonly modelDirectory: ModelDirectoryFace | null
   /** Deliver the edited text + kept images; resolves when sent, rejects with a user-facing message. */
-  readonly onSubmit: (text: string, selection: ModelSelection | null, images: readonly File[]) => Promise<void>
+  readonly onSubmit: (text: string, selection: ModelSelection | null, images: readonly File[], rollbackFiles: boolean) => Promise<void>
   readonly onCancel: () => void
 }
 
@@ -73,8 +75,11 @@ const IMAGE_SVG = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" x
 
 const CLOSE_SVG = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M2 2l6 6M8 2 2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`
 
-export function InlineEdit({ sessionId, initialText, initialImages, modelDirectory, onSubmit, onCancel }: InlineEditProps) {
-  const [draft, setDraft] = useState(initialText)
+export function InlineEdit({ sessionId, initialText, initialImages, draftKey, modelDirectory, onSubmit, onCancel }: InlineEditProps) {
+  const [draft, setDraft] = useState(() => {
+    try { return (draftKey && sessionStorage.getItem(draftKey)) || initialText } catch { return initialText }
+  })
+  const [rollbackFiles, setRollbackFiles] = useState(false)
   const [images, setImages] = useState<readonly InlineEditImage[]>(initialImages ?? [])
   const [busy, setBusy] = useState(false)
   const sending = useRef(false)
@@ -86,6 +91,10 @@ export function InlineEdit({ sessionId, initialText, initialImages, modelDirecto
   // Unmount cleanup reads the latest list without re-subscribing the effect.
   const imagesRef = useRef<readonly InlineEditImage[]>(images)
   imagesRef.current = images
+  useEffect(() => {
+    if (!draftKey) return
+    try { sessionStorage.setItem(draftKey, draft); announceDraftChange() } catch { /* Editor remains the recovery copy. */ }
+  }, [draftKey, draft])
 
   const subscribe = useCallback((onStoreChange: () => void): (() => void) => {
     if (modelDirectory === null) return () => {}
@@ -231,13 +240,14 @@ export function InlineEdit({ sessionId, initialText, initialImages, modelDirecto
           await modelDirectory.select(selection)
         }
       }
-      await onSubmit(text, selection, images.map(image => image.file))
+      await onSubmit(text, selection, images.map(image => image.file), rollbackFiles)
     } catch (cause) {
       if (!mounted.current) return
       setError(cause instanceof Error ? cause.message : String(cause))
       setBusy(false)
     } finally {
       sending.current = false
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -245,7 +255,7 @@ export function InlineEdit({ sessionId, initialText, initialImages, modelDirecto
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault()
       void send()
-    } else if (event.key === 'Escape') {
+    } else if (event.key === 'Escape' && !sending.current) {
       event.preventDefault()
       onCancel()
     }
@@ -276,6 +286,7 @@ export function InlineEdit({ sessionId, initialText, initialImages, modelDirecto
           ref={textareaRef}
           className={css.textarea}
           value={draft}
+          disabled={busy}
           rows={1}
           aria-label="编辑消息"
           placeholder="编辑后发送…"
@@ -283,6 +294,14 @@ export function InlineEdit({ sessionId, initialText, initialImages, modelDirecto
           onKeyDown={onKeyDown}
         />
         {error !== null && <div className={css.error} role="status">{error}</div>}
+        <div className={`${css.row} ${css.rollbackRow}`}>
+          <label>回退范围：<select className={css.modelSelect} disabled={busy} value={String(rollbackFiles)}
+            onChange={event => setRollbackFiles(event.target.value === 'true')}>
+            <option value="false">仅对话（保留文件）</option>
+            <option value="true">对话和文件（先备份）</option>
+          </select></label>
+          <span title="文字暂存在本标签页；图片在编辑器关闭后需要重新核对。">文字草稿自动暂存</span>
+        </div>
         <div className={css.row}>
           <div className={css.left}>
             <input

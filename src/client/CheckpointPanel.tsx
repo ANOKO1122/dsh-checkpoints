@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from 'rea
 import type { Checkpoint, SessionFace } from './context-types.ts'
 import css from './panel.module.css'
 import { findAnchorRow, scrollToRow } from './navigation.ts'
+import { createLatestRequest } from './latest-request.ts'
 
 const LIST_URL = '/plugins/dsh-checkpoints/list'
 
@@ -66,18 +67,20 @@ export function CheckpointPanel({ session, scrollport, embedded = false }: Check
   const [notice, setNotice] = useState<string | null>(null)
   const mounted = useRef(true)
   const refreshDebounce = useRef<number>(0)
+  const requests = useRef(createLatestRequest())
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!mounted.current) return
+    const isLatest = requests.current.begin()
     setLoading(true)
     setError(null)
     try {
       const next = await fetchCheckpoints(session.sessionId)
-      if (mounted.current) setCheckpoints(next)
+      if (mounted.current && isLatest()) setCheckpoints(next)
     } catch (cause) {
-      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
+      if (mounted.current && isLatest()) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      if (mounted.current) setLoading(false)
+      if (mounted.current && isLatest()) setLoading(false)
     }
   }, [session.sessionId])
 
@@ -85,6 +88,7 @@ export function CheckpointPanel({ session, scrollport, embedded = false }: Check
     mounted.current = true
     return () => {
       mounted.current = false
+      requests.current.invalidate()
       window.clearTimeout(refreshDebounce.current)
     }
   }, [])
@@ -95,10 +99,20 @@ export function CheckpointPanel({ session, scrollport, embedded = false }: Check
     // Drop any pending refresh scheduled by a previous session.
     window.clearTimeout(refreshDebounce.current)
     void refresh()
-    return session.subscribe(() => {
-      window.clearTimeout(refreshDebounce.current)
-      refreshDebounce.current = window.setTimeout(() => { void refresh() }, 400)
+    setCheckpoints([])
+    const off = session.subscribe(() => {
+      if (refreshDebounce.current) return
+      refreshDebounce.current = window.setTimeout(() => {
+        refreshDebounce.current = 0
+        void refresh()
+      }, 400)
     })
+    return () => {
+      off()
+      requests.current.invalidate()
+      window.clearTimeout(refreshDebounce.current)
+      refreshDebounce.current = 0
+    }
   }, [session, refresh])
 
   const scrollToCheckpoint = useCallback(async (seq: number): Promise<void> => {

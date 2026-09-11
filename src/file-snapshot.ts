@@ -19,6 +19,7 @@ import { promisify } from 'node:util'
 import { mkdir, readFile, readdir, copyFile, writeFile, stat, rename, rm } from 'node:fs/promises'
 import { join, dirname, resolve as resolvePath, sep } from 'node:path'
 import { homedir } from 'node:os'
+import { backupRestoreTargets, listRestoreFiles, safeRestorePath } from './restore-backup.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -75,7 +76,10 @@ async function forEachWithConcurrency<T>(
       await fn(item)
     }
   })
-  await Promise.all(workers)
+  // Do not release locks while other workers are still modifying files.
+  const outcomes = await Promise.allSettled(workers)
+  const failed = outcomes.find(outcome => outcome.status === 'rejected')
+  if (failed?.status === 'rejected') throw failed.reason
 }
 
 /** Directories never copied by the copy provider. */
@@ -258,8 +262,8 @@ async function copyWorkspace(src: string, dest: string, skipPrefix?: string): Pr
 
 /** Copy one file from snapshot back into the workspace. */
 async function restoreCopyFile(snapshotDir: string, cwd: string, relPath: string): Promise<void> {
-  const source = join(snapshotDir, relPath)
-  const target = join(cwd, relPath)
+  const source = await safeRestorePath(snapshotDir, relPath)
+  const target = await safeRestorePath(cwd, relPath)
   await mkdir(dirname(target), { recursive: true })
   await copyFile(source, target)
 }
@@ -279,7 +283,7 @@ async function quarantineFile(
   const destDir = join(snapshotRoot, 'quarantine', safeSegment(sessionId), `${Date.now()}-${randomUUID()}`)
   const target = join(destDir, relPath)
   await mkdir(dirname(target), { recursive: true })
-  const source = join(cwd, relPath)
+  const source = await safeRestorePath(cwd, relPath)
   try {
     await rename(source, target)
   } catch {
@@ -669,6 +673,48 @@ export async function restoreSnapshot(
   seq?: number,
   relPath?: string,
   options?: { deleteNewFiles?: boolean },
+): Promise<{ backupPath: string }> {
+  const snapshotRoot = root ?? defaultSnapshotRoot()
+  const index = await readIndex(snapshotRoot, sessionId)
+  const record = seq === undefined ? index.start : index.bySeq[seq]
+  if (!record) throw new Error(`no file snapshot available for checkpoint ${seq ?? 'session-start'}`)
+  const paths = new Set<string>()
+  if (record.commit !== undefined) {
+    const tree = await execFileAsync('git', ['-C', cwd, 'ls-tree', '-r', '-z', record.commit, '--', '.'], execOptions)
+    for (const entry of tree.stdout.split('\0').filter(Boolean)) {
+      const tab = entry.indexOf('\t')
+      const path = entry.slice(tab + 1)
+      if (relPath !== undefined && path !== relPath) continue
+      if (!entry.startsWith('100644 ') && !entry.startsWith('100755 ')) throw new Error(`不支持恢复 Git 链接或子模块：${path}`)
+      paths.add(path)
+    }
+    const tracked = await execFileAsync('git', ['-C', cwd, 'ls-files', '-z'], execOptions)
+    for (const path of tracked.stdout.split('\0').filter(Boolean)) paths.add(path)
+  }
+  const copyDir = record.kind === 'copy' ? record.dir : record.untrackedDir
+  if (copyDir) for (const path of await listRestoreFiles(copyDir)) paths.add(path)
+  if (options?.deleteNewFiles) for (const path of await listFiles(cwd, snapshotRoot)) paths.add(path)
+  const targets = relPath === undefined ? [...paths] : [relPath]
+  const backupPath = join(snapshotRoot, 'restore-backups', safeSegment(sessionId), `${Date.now()}-${randomUUID()}`)
+  const finish = await backupRestoreTargets(cwd, targets, backupPath)
+  try {
+    await restoreSnapshotUnsafe(root, sessionId, cwd, seq, relPath, options)
+    await finish('completed')
+    return { backupPath }
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    await finish('partial', detail).catch(() => {})
+    throw new Error(`文件可能已部分恢复。恢复前备份：${backupPath}；详细原因：${detail}`)
+  }
+}
+
+async function restoreSnapshotUnsafe(
+  root: string | undefined,
+  sessionId: string,
+  cwd: string,
+  seq?: number,
+  relPath?: string,
+  options?: { deleteNewFiles?: boolean },
 ): Promise<void> {
   // Strict resolution: restoring files to the wrong baseline silently would
   // be far worse than failing, so a missing per-checkpoint snapshot is an
@@ -687,7 +733,7 @@ export async function restoreSnapshot(
     const pathspec = relPath === undefined ? '.' : relPath
     await execFileAsync(
       'git',
-      ['-C', cwd, 'restore', '--worktree', `--source=${record.commit}`, '--', pathspec],
+      ['--literal-pathspecs', '-C', cwd, 'restore', '--worktree', `--source=${record.commit}`, '--', pathspec],
       execOptions,
     )
     return
@@ -698,7 +744,7 @@ export async function restoreSnapshot(
       if (record.commit !== undefined) {
         await execFileAsync(
           'git',
-          ['-C', cwd, 'restore', '--worktree', `--source=${record.commit}`, '--', '.'],
+          ['--literal-pathspecs', '-C', cwd, 'restore', '--worktree', `--source=${record.commit}`, '--', '.'],
           execOptions,
         )
       }
@@ -733,15 +779,14 @@ export async function restoreSnapshot(
       }
     }
     if (record.commit !== undefined) {
-      try {
+      const tracked = await execFileAsync('git', ['--literal-pathspecs', '-C', cwd, 'ls-tree', '-r', '--name-only', '-z', record.commit, '--', relPath], execOptions)
+      if (tracked.stdout.split('\0').includes(relPath)) {
         await execFileAsync(
           'git',
-          ['-C', cwd, 'restore', '--worktree', `--source=${record.commit}`, '--', relPath],
+          ['--literal-pathspecs', '-C', cwd, 'restore', '--worktree', `--source=${record.commit}`, '--', relPath],
           execOptions,
         )
         return
-      } catch {
-        // fall through to quarantine of a new untracked file
       }
     }
     await quarantineFile(root, sessionId, cwd, relPath)

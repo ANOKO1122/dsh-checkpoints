@@ -121,6 +121,8 @@ export interface InputFace {
 
 /** The conversation service face exposing the input resolver. */
 export interface ConversationFace {
+  sendSession?(session: SessionFace, text: string, attachmentIds: readonly string[], mode: 'queue'): Promise<{ kind: 'success' | 'error'; text?: string }>
+  releaseDraftAttachments?(attachments: readonly { readonly id: string }[]): void
   input: {
     for(actx: unknown): InputFace
   }

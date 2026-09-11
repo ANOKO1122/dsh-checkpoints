@@ -22,6 +22,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isAbsolute } from 'node:path'
+import { realpath } from 'node:fs/promises'
+import { createOperationLock, withMaintenance } from './operation-lock.ts'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent'
@@ -166,6 +168,12 @@ async function resolveBaseline(
 export function apply(ctx: Context, config: Config): void {
   const routePrefix = config.routePrefix ?? '/plugins/dsh-checkpoints'
   const snapshotRoot = config.snapshotRoot
+  const withWorkspaceLock = createOperationLock()
+  const completed = new WeakMap<Session, { key: string; revision: number; value: unknown }>()
+  const workspaceKey = async (cwd: string): Promise<string> => {
+    const path = await realpath(cwd)
+    return process.platform === 'win32' ? path.toLowerCase() : path
+  }
 
   // Serialize snapshot capture per session so concurrent user messages cannot
   // corrupt the JSON index.
@@ -199,7 +207,7 @@ export function apply(ctx: Context, config: Config): void {
     if (event.surfaceOp !== 'append') return
     const cwd = session.header.cwd
     if (!cwd) return
-    void withSnapshotLock(session.id, async () => {
+    void workspaceKey(cwd).then(key => withWorkspaceLock(key, () => withSnapshotLock(session.id, async () => {
       try {
         const root = await ensureRoot(snapshotRoot)
         const index = await readIndex(root, session.id)
@@ -207,7 +215,7 @@ export function apply(ctx: Context, config: Config): void {
       } catch (error: unknown) {
         ctx.logger.warn(`dsh-checkpoints: snapshot capture failed for ${session.id}: ${error instanceof Error ? error.message : String(error)}`)
       }
-    })
+    }))).catch(error => ctx.logger.warn(`dsh-checkpoints: snapshot lock failed: ${String(error)}`))
   })
 
   let webRegistered = false
@@ -431,84 +439,117 @@ export function apply(ctx: Context, config: Config): void {
           const cwd = session.header.cwd
 
           try {
-            if (path === `${routePrefix}/undo-file`) {
-              const relPath = payload.path
-              if (typeof relPath !== 'string' || !isSafeRelPath(relPath)) {
-                sendError(res, 400, 'BAD_REQUEST', 'missing or invalid path')
-                return
-              }
-              const baseline = payload.baseline === 'session' ? 'session' : 'checkpoint'
-              if (!cwd) {
-                sendError(res, 400, 'NO_CWD', 'session has no working directory for file undo')
-                return
-              }
-              const root = await ensureRoot(snapshotRoot)
-              const checkpoints = listCheckpoints(session)
-              const latest = checkpoints[checkpoints.length - 1]
-              const seq = baseline === 'session' ? undefined : latest?.seq
-              await restoreSnapshot(root, sessionId, cwd, seq, relPath)
-              sendJson(res, 200, { ok: true, value: { path: relPath } })
-              return
+            if (!agent || typeof agent.runMaintenance !== 'function') {
+              throw new Error('当前会话没有可用的维护任务接口，请先打开会话，并使用支持 runMaintenance 的 Harness。')
             }
-
-            const seq = payload.seq
-            if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0) {
-              sendError(res, 400, 'BAD_REQUEST', 'missing or invalid seq')
-              return
-            }
-
-            if (path === `${routePrefix}/rewind`) {
-              const event = await commitCheckpointRewrite(session, s => ctx.sessions.flush(s), () => rewindToCheckpoint(session, seq))
-              // The conversation rewrite has committed above; a file rollback
-              // problem must not be reported as a rejected rewrite.
-              let filesRestored = true
-              let fileError: string | undefined
-              if (payload.rollbackFiles === true && cwd) {
-                try {
+            const revision = session.seq
+            const key = cwd ? await workspaceKey(cwd) : `session:${sessionId}`
+            await withWorkspaceLock(key, async () => {
+              const fileOperation = path === `${routePrefix}/undo-file` || payload.rollbackFiles === true
+              if (fileOperation && !cwd) throw new Error('当前会话没有工作目录，未执行文件或对话回退。')
+              const candidates = fileOperation && cwd ? ctx.agents.list() : [agent]
+              const owners = []
+              for (const other of candidates) {
+                if (other === agent || (other.session.header.cwd && await workspaceKey(other.session.header.cwd) === key)) owners.push(other)
+              }
+              await withMaintenance(owners, async () => {
+                if (session.seq !== revision || ctx.agents.get(sessionId) !== agent) {
+                  throw new Error('等待期间会话已变化，请刷新检查点后重试；未执行回退。')
+                }
+                const requestKey = JSON.stringify([path, payload.seq, payload.path, payload.baseline, payload.rollbackFiles === true, payload.deleteNewFiles === true])
+                const cached = completed.get(session)
+                if (cached?.key === requestKey && cached.revision === session.seq) {
+                  sendJson(res, 200, { ok: true, value: cached.value })
+                  return
+                }
+                const respond = (value: unknown): void => {
+                  completed.set(session, { key: requestKey, revision: session.seq, value })
+                  sendJson(res, 200, { ok: true, value })
+                }
+                if (path === `${routePrefix}/undo-file`) {
+                  const relPath = payload.path
+                  if (typeof relPath !== 'string' || !isSafeRelPath(relPath)) {
+                    sendError(res, 400, 'BAD_REQUEST', 'missing or invalid path')
+                    return
+                  }
+                  const baseline = payload.baseline === 'session' ? 'session' : 'checkpoint'
+                  if (!cwd) {
+                    sendError(res, 400, 'NO_CWD', 'session has no working directory for file undo')
+                    return
+                  }
                   const root = await ensureRoot(snapshotRoot)
-                  await restoreSnapshot(
-                    root,
-                    sessionId,
-                    cwd,
-                    seq,
-                    undefined,
-                    { deleteNewFiles: payload.deleteNewFiles === true },
-                  )
-                } catch (error: unknown) {
-                  filesRestored = false
-                  fileError = error instanceof Error ? error.message : String(error)
-                  ctx.logger.warn(`dsh-checkpoints: file rollback failed after rewind: ${fileError}`)
+                  const checkpoints = listCheckpoints(session)
+                  const latest = checkpoints[checkpoints.length - 1]
+                  const seq = baseline === 'session' ? undefined : latest?.seq
+                  const restored = await restoreSnapshot(root, sessionId, cwd, seq, relPath)
+                  // A single-file undo may legitimately be repeated after edits.
+                  sendJson(res, 200, { ok: true, value: { path: relPath, fileBackup: restored.backupPath } })
+                  return
                 }
-              }
-              // Record a fresh file snapshot at the rewind point so the new
-              // checkpoint also has file state to compare/restore against.
-              if (cwd) {
-                try {
-                  await withSnapshotLock(sessionId, async () => {
-                    const root = await ensureRoot(snapshotRoot)
-                    const index = await readIndex(root, sessionId)
-                    await captureSnapshot(root, sessionId, cwd, event.seq, index.start === undefined, index)
-                  })
-                } catch (error: unknown) {
-                  ctx.logger.warn(`dsh-checkpoints: post-rewind snapshot capture failed: ${error instanceof Error ? error.message : String(error)}`)
+
+                const seq = payload.seq
+                if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0) {
+                  sendError(res, 400, 'BAD_REQUEST', 'missing or invalid seq')
+                  return
                 }
-              }
-              sendJson(res, 200, {
-                ok: true,
-                value: {
-                  seq: event.seq,
-                  filesRestored,
-                  ...(fileError === undefined ? {} : { fileError }),
-                },
+
+                if (path === `${routePrefix}/rewind`) {
+                  const fresh = session.surface.nodes.some(node => node === seq)
+                  const event = await commitCheckpointRewrite(session, s => ctx.sessions.flush(s), () => rewindToCheckpoint(session, seq))
+                  // The conversation rewrite has committed above; a file rollback
+                  // problem must not be reported as a rejected rewrite.
+                  let filesRestored = true
+                  let fileError: string | undefined
+                  let fileBackup: string | undefined
+                  if (payload.rollbackFiles === true && cwd) {
+                    try {
+                      if (!fresh) throw new Error('这是已提交回退的重试，文件恢复状态无法确认；为避免覆盖新改动，未再次恢复文件。')
+                      const root = await ensureRoot(snapshotRoot)
+                      const restored = await restoreSnapshot(
+                        root,
+                        sessionId,
+                        cwd,
+                        seq,
+                        undefined,
+                        { deleteNewFiles: payload.deleteNewFiles === true },
+                      )
+                      fileBackup = restored.backupPath
+                    } catch (error: unknown) {
+                      filesRestored = false
+                      fileError = error instanceof Error ? error.message : String(error)
+                      ctx.logger.warn(`dsh-checkpoints: file rollback failed after rewind: ${fileError}`)
+                    }
+                  }
+                  // Record a fresh file snapshot at the rewind point so the new
+                  // checkpoint also has file state to compare/restore against.
+                  if (cwd && filesRestored) {
+                    try {
+                      await withSnapshotLock(sessionId, async () => {
+                        const root = await ensureRoot(snapshotRoot)
+                        const index = await readIndex(root, sessionId)
+                        await captureSnapshot(root, sessionId, cwd, event.seq, index.start === undefined, index)
+                      })
+                    } catch (error: unknown) {
+                      ctx.logger.warn(`dsh-checkpoints: post-rewind snapshot capture failed: ${error instanceof Error ? error.message : String(error)}`)
+                    }
+                  }
+                  respond({
+                      seq: event.seq,
+                      filesRestored,
+                      fileBackup,
+                      ...(fileError === undefined ? {} : { fileError }),
               })
             } else {
+              const fresh = session.surface.nodes.some(node => node === seq)
               const { removedText, event } = await commitCheckpointRewrite(session, s => ctx.sessions.flush(s), () => recallUserMessage(session, seq))
               let filesRestored = true
               let fileError: string | undefined
+              let fileBackup: string | undefined
               if (payload.rollbackFiles === true && cwd) {
                 try {
+                  if (!fresh) throw new Error('这是已提交回退的重试，文件恢复状态无法确认；为避免覆盖新改动，未再次恢复文件。')
                   const root = await ensureRoot(snapshotRoot)
-                  await restoreSnapshot(
+                  const restored = await restoreSnapshot(
                     root,
                     sessionId,
                     cwd,
@@ -516,22 +557,23 @@ export function apply(ctx: Context, config: Config): void {
                     undefined,
                     { deleteNewFiles: payload.deleteNewFiles === true },
                   )
+                  fileBackup = restored.backupPath
                 } catch (error: unknown) {
                   filesRestored = false
                   fileError = error instanceof Error ? error.message : String(error)
                   ctx.logger.warn(`dsh-checkpoints: file rollback failed after recall: ${fileError}`)
                 }
               }
-              sendJson(res, 200, {
-                ok: true,
-                value: {
+              respond({
                   seq: event.seq,
                   removedText,
                   filesRestored,
+                  fileBackup,
                   ...(fileError === undefined ? {} : { fileError }),
-                },
               })
             }
+              })
+            })
           } catch (error: unknown) {
             if (error instanceof CheckpointSaveError) {
               sendError(res, 503, 'CHECKPOINT_SAVE_FAILED', error.message, { sessionId, seq: payload.seq, committed: error.committed })
