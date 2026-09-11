@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import type { Checkpoint, SessionFace } from './context-types.ts'
 import css from './panel.module.css'
+import { findAnchorRow, scrollToRow } from './navigation.ts'
 
 const LIST_URL = '/plugins/dsh-checkpoints/list'
 
@@ -56,25 +57,6 @@ function formatTime(time: number): string {
   if (Number.isNaN(date.getTime())) return ''
   const clock = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   return `${date.getMonth() + 1}月${date.getDate()}日 ${clock}`
-}
-
-function findAnchorRow(scrollport: HTMLElement, key: string): HTMLElement | null {
-  for (const el of scrollport.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')) {
-    if (el.dataset.chatAnchorKey === key) return el
-  }
-  return null
-}
-
-function scrollToRow(scrollport: HTMLElement, row: HTMLElement): void {
-  const rowRect = row.getBoundingClientRect()
-  const spRect = scrollport.getBoundingClientRect()
-  const target = scrollport.scrollTop + (rowRect.top - spRect.top) - spRect.height * 0.5 + rowRect.height * 0.5
-  const top = Math.max(0, target)
-  if (typeof scrollport.scrollTo === 'function') {
-    scrollport.scrollTo({ top, behavior: 'smooth' })
-  } else {
-    scrollport.scrollTop = top
-  }
 }
 
 export function CheckpointPanel({ session, scrollport, embedded = false }: CheckpointPanelProps): ReactElement | null {
@@ -149,12 +131,20 @@ export function CheckpointPanel({ session, scrollport, embedded = false }: Check
     }
 
     let row = findRow()
-    if (row === null && typeof session.loadOlder === 'function') {
+    if (row === null && typeof session.loadThrough === 'function') {
+      setNotice('正在加载该检查点的历史消息…')
+      try {
+        await session.loadThrough(seq)
+        row = await waitForRow()
+      } catch (cause) {
+        setNotice(cause instanceof Error ? cause.message : String(cause))
+        return
+      }
+    } else if (row === null && typeof session.loadOlder === 'function') {
       setNotice('正在加载更早的消息以定位…')
-      const snapshot = session.snapshotCache as { hasMore?: boolean }
       for (let attempt = 0; attempt < 20 && row === null; attempt++) {
-        if (snapshot.hasMore === false) break
-        const before = snapshot.hasMore
+        if (session.snapshotCache.hasMore === false) break
+        const before = session.snapshotCache.chat?.order[0]
         try {
           await session.loadOlder()
         } catch (cause) {
@@ -162,11 +152,13 @@ export function CheckpointPanel({ session, scrollport, embedded = false }: Check
           break
         }
         row = await waitForRow()
-        if (row === null && before === snapshot.hasMore) break
+        if (row === null && before === session.snapshotCache.chat?.order[0]) break
       }
     }
 
     if (row !== null) {
+      row.dispatchEvent(new Event('beforematch', { bubbles: true }))
+      await new Promise<void>(resolve => { requestAnimationFrame(() => requestAnimationFrame(() => resolve())) })
       scrollToRow(scrollport, row)
       setNotice(null)
       return

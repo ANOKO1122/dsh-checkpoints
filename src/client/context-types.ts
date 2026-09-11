@@ -51,7 +51,7 @@ export interface ChatNode {
 /** The assembled chat view snapshot (subset). */
 export interface ChatSnapshot {
   readonly order: readonly string[]
-  readonly nodes: ReadonlyMap<string, ChatNode>
+  readonly nodes: { get(key: string): ChatNode | undefined; values(): Iterable<ChatNode> }
   readonly locations?: {
     readonly turns?: ReadonlyMap<number, readonly string[]>
   }
@@ -62,6 +62,7 @@ export interface ConversationSnapshot {
   readonly sessionId: string
   readonly chat?: ChatSnapshot
   readonly running?: boolean
+  readonly hasMore?: boolean
 }
 
 /** Loose RPC result mirror (every runtime call answers one of these). */
@@ -82,6 +83,8 @@ export interface SessionFace {
   readonly sessionId: string
   subscribe(listener: () => void): () => void
   snapshotCache: ConversationSnapshot
+  getSnapshot?(): ConversationSnapshot
+  loadThrough?(seq: number): Promise<void>
   /** Load the next page of older history, when the runtime exposes it. */
   loadOlder?(): Promise<void>
   /**
@@ -113,6 +116,7 @@ export interface InputFace {
   submit(): void
   /** Append browser-owned draft image ids to the composer rail (absent on older runtimes). */
   addImages?(ids: readonly string[]): boolean
+  addAttachments?(ids: readonly string[]): boolean
 }
 
 /** The conversation service face exposing the input resolver. */
@@ -122,6 +126,7 @@ export interface ConversationFace {
   }
   /** Register browser files as composer draft images; absent on older runtimes. */
   createDraftImages?(files: readonly File[]): readonly { readonly id: string }[]
+  createDrafts?(sessionId: string, files: readonly File[]): readonly { readonly id: string }[]
 }
 
 /** Host-advisory complete provider/model/reasoning selection. */

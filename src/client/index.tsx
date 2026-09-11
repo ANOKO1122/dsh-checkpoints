@@ -21,12 +21,13 @@ import type { Context, ConversationFace, ModelDirectoryFace, ModelDirectoriesFac
 import { DiffViewerOverlay } from './diff-viewer.tsx'
 import type { InlineEditImage } from './inline-edit.tsx'
 import { InlineEdit } from './inline-edit.tsx'
+import { adaptSessions } from './runtime-session.ts'
 import { reconcileMessageActions, type MessageImageRef } from './message-actions.ts'
 import { RoundChangesCard } from './round-changes-card.tsx'
 import { CheckpointSidebarOverlay, createPanelStore, type RootSlotRuntimeProps } from './sidebar.tsx'
 
 /** Services required before mounting. */
-export const inject = ['sessions', 'slots']
+export const inject = ['sessions', 'slots', 'uiConversation']
 
 /** Minimum delay between DOM-recovery attach attempts. */
 const ATTACH_COOLDOWN_MS = 300
@@ -89,7 +90,8 @@ async function fetchShadowedSeqs(sessionId: string): Promise<Set<number>> {
 }
 
 export function apply(ctx: Context): void {
-  const sessions = ctx.sessions
+  const uiConversation = ctx.get('uiConversation') as { binding(binding: unknown): { target(name: string): { getSnapshot(): import('./context-types.ts').ChatSnapshot | undefined; subscribe(listener: () => void): () => void } } } | undefined
+  const sessions = adaptSessions(ctx.sessions, binding => uiConversation?.binding(binding).target('chat'))
 
   const slots = ctx.slots
   const panelStore = createPanelStore()
@@ -261,8 +263,9 @@ export function apply(ctx: Context): void {
               const conversation = ctx.get('conversation') as ConversationFace | undefined
               const scope = sessions.scope(sessionId)
               const input = conversation !== undefined && scope !== undefined ? conversation.input.for(scope) : undefined
-              const ids = (conversation?.createDraftImages?.(files) ?? []).map(attachment => attachment.id)
-              if (input?.addImages !== undefined && ids.length > 0 && input.addImages(ids)) {
+              const drafts = conversation?.createDrafts?.(sessionId, files) ?? conversation?.createDraftImages?.(files) ?? []
+              const ids = drafts.map(attachment => attachment.id)
+              if (ids.length > 0 && (input?.addAttachments?.(ids) ?? input?.addImages?.(ids))) {
                 restoredImages = ids.length
               }
             } catch (cause) {
@@ -274,7 +277,7 @@ export function apply(ctx: Context): void {
           }
           const draftSet = setDraftFor(sessionId, editedText)
           await new Promise<void>((resolve) => { window.setTimeout(resolve, 0) })
-          const submitted = draftSet && submitFor(sessionId)
+          const submitted = draftSet && imageProblem === undefined && submitFor(sessionId)
           scheduleReconcile()
           // 5) The conversation has already been rewound at this point, so any
           // late failure must be reported instead of silently dropping either

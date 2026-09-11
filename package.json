@@ -1,6 +1,6 @@
 {
   "name": "dsh-checkpoints",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "DSH conversation checkpoints: list every user instruction, jump/scroll to it, roll the visible conversation back to it (optionally with file snapshots), recall/edit sent instructions, show this round's file changes inline under the conversation, and a VS Code-like diff viewer (unified/side-by-side) with per-file undo.",
   "type": "module",
   "main": "lib/index.js",
@@ -79,9 +79,11 @@
     }
   },
   "devDependencies": {
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^24.0.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "^18.3.7",
+    "jsdom": "^30.0.1",
     "lightningcss": "^1.33.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
