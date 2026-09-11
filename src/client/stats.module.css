@@ -217,8 +217,7 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
-/* Embedded inside the sidebar panel: strip every fixed-card property and
-   occupy exactly the bottom half of the sidebar body, scrolling internally. */
+/* Embedded file drawer: use the full available body, scrolling internally. */
 .embedded {
   position: static;
   width: auto;
@@ -242,8 +241,13 @@
   overflow-y: auto;
 }
 
+.embedded .head {
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
 @media (max-width: 767px) {
-  .bar {
+  .bar:not(.embedded) {
     top: auto;
     bottom: 8px;
     right: 8px;

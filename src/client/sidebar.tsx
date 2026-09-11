@@ -1,5 +1,5 @@
 /**
- * Sidebar integration for checkpoints + file changes.
+ * File-only sidebar. Turn navigation is provided by the native Harness rail.
  *
  * The DSH frame has no add-a-right-column slot (the right `details` column is
  * owned by tool details), so we use the additive root-scope `shell.overlay`
@@ -8,13 +8,12 @@
  *   - the docked right-hand panel itself (while open)
  *
  * One tiny external store keeps the tab and the panel in sync, and the panel
- * renders the existing CheckpointPanel / FileStatsBar in `embedded` mode
+ * renders FileStatsBar in `embedded` mode
  * (no floating chrome).
  */
 
 import { useCallback, useSyncExternalStore } from 'react'
 import type { SessionFace, SessionListState } from './context-types.ts'
-import { CheckpointPanel } from './CheckpointPanel.tsx'
 import { FileStatsBar } from './FileStatsBar.tsx'
 import css from './sidebar.module.css'
 
@@ -49,28 +48,23 @@ export function createPanelStore(): PanelStore {
   }
 }
 
-const HISTORY_ICON = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M8 1.75C4.548 1.75 1.75 4.548 1.75 8s2.798 6.25 6.25 6.25S14.25 11.452 14.25 8h-1.5A4.75 4.75 0 1 1 8 3.25c1.35 0 2.566.567 3.42 1.475L10 6h4V2l-1.5 1.5C11.3 2.27 9.75 1.75 8 1.75ZM8 4.75v3.5l2.75 1.625.5-.875L9 7.5V4.75H8Z" fill="currentColor"/></svg>`
+const FILES_ICON = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 1.75h5l3 3v9.5H4zM9 1.75v3h3M6 8h4M6 10.5h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
 
 interface SidebarPanelProps {
   readonly session: SessionFace
-  readonly scrollport: HTMLElement
   readonly onClose: () => void
 }
 
-export function CheckpointSidebarPanel({ session, scrollport, onClose }: SidebarPanelProps) {
+export function CheckpointSidebarPanel({ session, onClose }: SidebarPanelProps) {
   return (
-    <div className={css.root}>
+    <div className={css.root} role="complementary" aria-label="文件改动">
       <div className={css.header}>
-        <span className={css.title}>检查点 · 文件改动</span>
+        <span className={css.title}>文件改动</span>
         <button type="button" className={css.close} aria-label="关闭" title="关闭" onClick={onClose}>×</button>
       </div>
       <div className={css.body}>
-        <CheckpointPanel
-          embedded
-          session={session}
-          scrollport={scrollport}
-        />
         <FileStatsBar
+          key={session.sessionId}
           embedded
           sessionId={session.sessionId}
           session={session}
@@ -110,24 +104,20 @@ export function CheckpointSidebarOverlay({ panelStore, sessions, useSessions }: 
       <button
         type="button"
         className={css.edgeButton}
-        aria-label="打开检查点 · 文件改动"
+        aria-label="打开文件改动"
         aria-expanded={false}
-        title="检查点 · 文件改动"
+        title="文件改动"
         onClick={() => { panelStore.toggle() }}
       >
-        <span className={css.edgeIcon} dangerouslySetInnerHTML={{ __html: HISTORY_ICON }} />
-        <span className={css.edgeLabel}>检查点</span>
+        <span className={css.edgeIcon} dangerouslySetInnerHTML={{ __html: FILES_ICON }} />
+        <span className={css.edgeLabel}>文件改动</span>
       </button>
     )
   }
 
-  const scrollport = document.querySelector<HTMLElement>('[data-conversation-scroll]')
-  if (scrollport === null) return null
-
   return (
     <CheckpointSidebarPanel
       session={binding.session}
-      scrollport={scrollport}
       onClose={() => { panelStore.close() }}
     />
   )

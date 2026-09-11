@@ -1,4 +1,4 @@
-/* Right-hand session sidebar for checkpoints + file changes. It rides the
+/* Right-hand session sidebar for file changes. It rides the
    shell.overlay slot and is styled as a docked panel (full height, left
    border, frame tokens) so it reads as part of the DSH layout rather than a
    floating popover. */
@@ -67,8 +67,7 @@
   color: var(--dsw-alias-label-primary);
 }
 
-/* The two embedded sections split this body 50/50 and scroll internally,
-   so the body itself never scrolls. */
+/* The file section owns all available height and scrolls internally. */
 .body {
   flex: 1;
   min-height: 0;

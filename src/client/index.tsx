@@ -1,7 +1,7 @@
 /**
  * Browser half of dsh-checkpoints.
  *
- * Registers a sidebar-footer toggle and a docked right-hand "检查点 · 文件改动"
+ * Repositions the native turn rail to the left and registers a right-hand "文件改动"
  * sidebar, inserts an inline edit icon next to the built-in copy icon under
  * every rendered user message, and keeps message-action DOM in sync. Clicking
  * the edit icon hides the original row and mounts an inline editor in its
@@ -24,6 +24,7 @@ import { InlineEdit } from './inline-edit.tsx'
 import { loadRequiredImages } from './required-images.ts'
 import { createLatestRequest } from './latest-request.ts'
 import { DraftRecovery, announceDraftChange } from './draft-recovery.tsx'
+import { installNativeTurnNavigation } from './native-turn-navigation.ts'
 import { adaptSessions } from './runtime-session.ts'
 import { reconcileMessageActions, type MessageImageRef } from './message-actions.ts'
 import { RoundChangesCard } from './round-changes-card.tsx'
@@ -93,6 +94,7 @@ async function fetchShadowedSeqs(sessionId: string): Promise<Set<number>> {
 }
 
 export function apply(ctx: Context): void {
+  ctx.effect(() => installNativeTurnNavigation(), 'dsh-checkpoints: native left navigation')
   const uiConversation = ctx.get('uiConversation') as { binding(binding: unknown): { target(name: string): { getSnapshot(): import('./context-types.ts').ChatSnapshot | undefined; subscribe(listener: () => void): () => void } } } | undefined
   const sessions = adaptSessions(ctx.sessions, binding => uiConversation?.binding(binding).target('chat'))
 
