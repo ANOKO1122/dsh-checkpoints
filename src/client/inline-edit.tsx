@@ -77,6 +77,7 @@ export function InlineEdit({ sessionId, initialText, initialImages, modelDirecto
   const [draft, setDraft] = useState(initialText)
   const [images, setImages] = useState<readonly InlineEditImage[]>(initialImages ?? [])
   const [busy, setBusy] = useState(false)
+  const sending = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [selection, setSelection] = useState<ModelSelection | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -215,7 +216,8 @@ export function InlineEdit({ sessionId, initialText, initialImages, modelDirecto
 
   const send = async (): Promise<void> => {
     const text = draft.trim()
-    if (busy || (text === '' && images.length === 0)) return
+    if (sending.current || busy || (text === '' && images.length === 0)) return
+    sending.current = true
     setBusy(true)
     setError(null)
     try {
@@ -234,6 +236,8 @@ export function InlineEdit({ sessionId, initialText, initialImages, modelDirecto
       if (!mounted.current) return
       setError(cause instanceof Error ? cause.message : String(cause))
       setBusy(false)
+    } finally {
+      sending.current = false
     }
   }
 

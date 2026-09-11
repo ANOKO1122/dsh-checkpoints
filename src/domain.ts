@@ -98,6 +98,8 @@ export function rewindToCheckpoint(session: Session, checkpointSeq: number): Ses
   const nodes = [...session.surface.nodes]
   const startIndex = nodes.indexOf(targetSeq)
   if (startIndex === -1) {
+    const retried = retryReplacement(session, targetSeq, 'rewind')
+    if (retried?.type === 'user/message') return retried
     throw new Error(`checkpoint ${checkpointSeq} is not in the current visible conversation`)
   }
   const target = session.eventAt(targetSeq)
@@ -132,6 +134,11 @@ export function recallUserMessage(
   const nodes = [...session.surface.nodes]
   const targetIndex = nodes.indexOf(targetSeq)
   if (targetIndex === -1) {
+    const retried = retryReplacement(session, targetSeq, 'recall')
+    const original = session.eventAt(targetSeq)
+    if (retried?.type === 'system/message' && original?.type === 'user/message') {
+      return { removedText: textOfUserMessage(original), event: retried }
+    }
     throw new Error(`checkpoint ${checkpointSeq} is not in the current visible conversation`)
   }
   const target = session.eventAt(targetSeq)
@@ -149,4 +156,23 @@ export function recallUserMessage(
     nodes.slice(targetIndex),
   )
   return { removedText, event }
+}
+
+/** Retry only the exact terminal replacement; never resurrect a stale branch. */
+function retryReplacement(session: Session, targetSeq: SessionSeq, mode: 'recall' | 'rewind'): SessionEvent | undefined {
+  const tailSeq = session.surface.nodes.at(-1)
+  if (tailSeq === undefined) return undefined
+  const tail = session.eventAt(tailSeq)
+  const original = session.eventAt(targetSeq)
+  if (original?.type !== 'user/message' || original.data.source.kind !== 'user') return undefined
+  if (!tail || typeof tail.surfaceOp !== 'object' || tail.surfaceOp.op !== 'replace'
+    || tail.surfaceOp.startSeq !== targetSeq || !tail.sourceEventSeqs?.includes(targetSeq)) return undefined
+  if (mode === 'recall' && tail.type === 'system/message') {
+    const message = tail.data.message
+    if (message.source.kind === 'plugin' && message.source.plugin === 'dsh-checkpoints'
+      && message.content.every(block => block.type === 'text' && block.text === '')) return tail
+  }
+  if (mode === 'rewind' && tail.type === 'user/message' && tail.data.source.kind === 'user'
+    && JSON.stringify(tail.data.content) === JSON.stringify(original.data.content)) return tail
+  return undefined
 }

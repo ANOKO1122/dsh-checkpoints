@@ -26,6 +26,7 @@ import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent'
 import { listCheckpoints, recallUserMessage, rewindToCheckpoint } from './domain.ts'
+import { CheckpointSaveError, commitCheckpointRewrite } from './rewrite-commit.ts'
 import { shadowedSeqsForSession } from './surface-cache.ts'
 import { diffToHunks, looksBinary, MAX_DIFF_TEXT_CHARS } from './file-diff.ts'
 import {
@@ -457,8 +458,7 @@ export function apply(ctx: Context, config: Config): void {
             }
 
             if (path === `${routePrefix}/rewind`) {
-              const event = rewindToCheckpoint(session, seq)
-              await ctx.sessions.flush(session)
+              const event = await commitCheckpointRewrite(session, s => ctx.sessions.flush(s), () => rewindToCheckpoint(session, seq))
               // The conversation rewrite has committed above; a file rollback
               // problem must not be reported as a rejected rewrite.
               let filesRestored = true
@@ -502,8 +502,7 @@ export function apply(ctx: Context, config: Config): void {
                 },
               })
             } else {
-              const { removedText, event } = recallUserMessage(session, seq)
-              await ctx.sessions.flush(session)
+              const { removedText, event } = await commitCheckpointRewrite(session, s => ctx.sessions.flush(s), () => recallUserMessage(session, seq))
               let filesRestored = true
               let fileError: string | undefined
               if (payload.rollbackFiles === true && cwd) {
@@ -534,6 +533,10 @@ export function apply(ctx: Context, config: Config): void {
               })
             }
           } catch (error: unknown) {
+            if (error instanceof CheckpointSaveError) {
+              sendError(res, 503, 'CHECKPOINT_SAVE_FAILED', error.message, { sessionId, seq: payload.seq, committed: error.committed })
+              return
+            }
             ctx.logger.warn(`dsh-checkpoints: ${path} failed: ${error instanceof Error ? error.message : String(error)}`)
             sendError(res, 422, 'REWRITE_REJECTED', error instanceof Error ? error.message : String(error), { sessionId, seq: payload.seq })
           }
